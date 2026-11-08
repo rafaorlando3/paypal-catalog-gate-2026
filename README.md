@@ -28,13 +28,28 @@ Optional advisory model: `GEMINI_API_KEY` (and `GEMINI_MODEL`). Without it the U
 2. **Authorize**: Orders v2 with `intent: AUTHORIZE`; the buyer approves; the order is authorized.
 3. **Deliver and check**: a deterministic check produces the report (file sha256, rejections by line, duplicate keys, sample mismatches) and a verdict: PASS, PASS WITH REJECTIONS (capture needs "I read the N rejected rows") or FAIL (no capture).
 4. **Explain**: the model sees only the report, never the raw file. A checker rejects any citation outside the file or without a finding.
-5. **Capture**: one human click sends `POST /v2/payments/authorizations/{id}/capture` with `final_capture: true` and no amount (the full authorized amount). No partial capture.
+5. **Capture**: one human click sends `POST /v2/payments/authorizations/{id}/capture` with the full authorized amount stated explicitly and `final_capture: true`. No partial capture.
 
-Safety rules in code (`src/pedido.mjs`): PayPal-Request-Id derived from (order, operation, authorization) and a stored payload hash (same id with a different payload is blocked locally); per-order lock; lost response goes to UNCERTAIN and is reconciled by GET only, with the capture linked back to the authorization; PENDING capture is not counted as received; no void after capture; one reauthorization, by a human, days 4 to 29; expired on day 30; webhooks deduplicated and applied forward only.
+Safety rules in code (`src/pedido.mjs`): a deterministic UUID-shaped PayPal-Request-Id derived from (order, operation, authorization) and a stored payload hash (same id with a different payload is blocked locally); per-order lock; lost response goes to UNCERTAIN and is reconciled by GET only, with the capture linked back to the authorization; PENDING capture is not counted as received; no void after capture; one reauthorization, by a human, days 4 to 29; expired on day 30; webhooks deduplicated and applied forward only.
+
+## Persistence and webhooks (sandbox mode)
+
+- Orders, request ids, payload hashes and processed webhook ids are kept in `DATA_DIR/orders.json`, written atomically. On restart every order is restored; an order that was in the middle of a capture POST comes back as UNCERTAIN and can only be reconciled by GET.
+- `POST /webhooks/paypal` (sandbox mode with `PAYPAL_WEBHOOK_ID`) verifies the PayPal signature with the documented self-verification (transmission id, time, webhook id and CRC32 of the raw body, SHA256withRSA against the certificate from an https paypal.com URL), deduplicates by event id and applies events forward only.
+- Fixture mode keeps everything in memory and says so on screen.
+
+## PayPal references (read 8 Nov 2026)
+
+- Orders v2 authorize: https://developer.paypal.com/api/orders/v2/orders-authorize
+- Capture an authorization (`final_capture`): https://developer.paypal.com/api/payments/v2/authorizations-capture
+- Authorization honor period and 29-day validity: https://developer.paypal.com/docs/checkout/advanced/authorization-honor/
+- Idempotency (`PayPal-Request-Id`): https://developer.paypal.com/api/rest/reference/idempotency/
+- Webhook signature verification: https://developer.paypal.com/api/rest/webhooks/rest/
+- Webhook event names: https://developer.paypal.com/api/rest/webhooks/event-names/
 
 ## Not done yet
 
-Webhook endpoint with signature verification, persistence (state is in memory), English messages for every rule finding, hosted demo, video.
+First sandbox receipt (needs the sandbox app credentials in the server environment), hosted demo, video. Webhook postback verification through `verify-webhook-signature` is not used; self-verification is.
 
 ## License
 

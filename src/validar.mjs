@@ -11,10 +11,10 @@ function parse(texto) {
 }
 
 function checarCampo(col, valor) {
-  if (valor === undefined || valor === '') return col.obrigatorio ? 'obrigatório' : null;
-  if (col.regex && !new RegExp(col.regex).test(valor)) return 'formato';
+  if (valor === undefined || valor === '') return col.obrigatorio ? 'required' : null;
+  if (col.regex && !new RegExp(col.regex).test(valor)) return 'format';
   if (col.tipo === 'decimal_positivo' && (!DEC.test(valor) || Number(valor) <= 0)) return 'decimal > 0';
-  if (col.tipo === 'inteiro_nao_negativo' && !INT.test(valor)) return 'inteiro >= 0';
+  if (col.tipo === 'inteiro_nao_negativo' && !INT.test(valor)) return 'integer >= 0';
   return null;
 }
 
@@ -32,7 +32,7 @@ export function validar(brief, lote, amostra) {
   if (linhas[0] !== esperado) {
     const recebidos = (linhas[0] || '').split(',');
     const errados = recebidos.filter((c, i) => c !== brief.colunas[i]?.nome);
-    return { ...base, rejeicoes: [{ linha: 1, campo: errados.join('|') || '(vazio)', motivo: 'cabeçalho' }], veredito: 'vermelho', motivos: ['cabeçalho diferente do brief'] };
+    return { ...base, rejeicoes: [{ linha: 1, campo: errados.join('|') || '(vazio)', motivo: 'header' }], veredito: 'vermelho', motivos: ['header differs from the brief'] };
   }
   const dados = linhas.slice(1);
   const vistos = new Map();
@@ -42,7 +42,7 @@ export function validar(brief, lote, amostra) {
     const linha = i + 2;
     const cel = l.split(',');
     let erro = null;
-    if (cel.length !== brief.colunas.length) erro = { linha, campo: '*', motivo: 'número de colunas' };
+    if (cel.length !== brief.colunas.length) erro = { linha, campo: '*', motivo: 'column count' };
     else for (let j = 0; j < brief.colunas.length && !erro; j++) {
       const m = checarCampo(brief.colunas[j], cel[j]);
       if (m) erro = { linha, campo: brief.colunas[j].nome, motivo: m };
@@ -65,9 +65,9 @@ export function validar(brief, lote, amostra) {
     return r;
   });
   const motivos = [];
-  if (duplicatas.length) motivos.push('chave duplicada');
-  if (amostraRes.some((a) => !a.confere)) motivos.push('amostra divergente');
-  if (validas < minimo) motivos.push(`válidas ${validas} abaixo do mínimo ${minimo}`);
+  if (duplicatas.length) motivos.push('duplicate key');
+  if (amostraRes.some((a) => !a.confere)) motivos.push('approved sample differs');
+  if (validas < minimo) motivos.push(`valid rows ${validas} below the minimum ${minimo}`);
   const veredito = motivos.length ? 'vermelho' : rejeicoes.length ? 'amarelo' : 'verde';
   return { ...base, lidas: dados.length, validas, rejeicoes, duplicatas, amostra: amostraRes, veredito, motivos };
 }

@@ -10,15 +10,15 @@ export function linhasCitadas(texto) {
 }
 
 export function checarParecer(texto, rel) {
-  if (typeof texto !== 'string' || !texto.trim()) return { ok: false, motivo: 'parecer vazio' };
+  if (typeof texto !== 'string' || !texto.trim()) return { ok: false, motivo: 'empty advisory' };
   const max = rel.lidas + 1; // header is line 1
   const citadas = linhasCitadas(texto);
   const fora = citadas.filter((n) => n < 1 || n > max);
-  if (fora.length) return { ok: false, motivo: `cita linha inexistente: ${fora.join(', ')} (válidas 1..${max})` };
+  if (fora.length) return { ok: false, motivo: `cites a line that does not exist: ${fora.join(', ')} (valid 1..${max})` };
   const relevantes = new Set([...rel.rejeicoes.map((r) => r.linha), ...rel.duplicatas.flatMap((d) => d.linhas), ...rel.amostra.filter((a) => !a.confere).map((a) => a.linha)]);
   const semBase = citadas.filter((n) => !relevantes.has(n));
-  if (semBase.length) return { ok: false, motivo: `cita linha sem achado no relatório: ${semBase.join(', ')}` };
-  if (relevantes.size && !citadas.length) return { ok: false, motivo: 'há achados e o parecer não cita linha' };
+  if (semBase.length) return { ok: false, motivo: `cites a line with no finding in the report: ${semBase.join(', ')}` };
+  if (relevantes.size && !citadas.length) return { ok: false, motivo: 'there are findings and the advisory cites no line' };
   return { ok: true };
 }
 
@@ -36,7 +36,7 @@ export function prompt(rel, brief) {
 /** Optional live advisor (Gemini REST). Without a key it throws, and the UI shows "advisory unavailable". */
 export function geradorGemini({ chave = process.env.GEMINI_API_KEY, modelo = process.env.GEMINI_MODEL || 'gemini-2.5-flash', timeoutMs = 15000 } = {}) {
   return async (rel, brief) => {
-    if (!chave) throw new Error('GEMINI_API_KEY ausente');
+    if (!chave) throw new Error('GEMINI_API_KEY not set');
     if (!rel.rejeicoes.length && !rel.duplicatas.length && rel.amostra.every((a) => a.confere)) return `All ${rel.validas} rows passed the agreed rules and the approved sample matches.`;
     const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
@@ -45,7 +45,7 @@ export function geradorGemini({ chave = process.env.GEMINI_API_KEY, modelo = pro
         headers: { 'content-type': 'application/json', 'x-goog-api-key': chave },
         body: JSON.stringify({ contents: [{ parts: [{ text: prompt(rel, brief) }] }], generationConfig: { temperature: 0, maxOutputTokens: 300 } }),
       });
-      if (!r.ok) throw new Error(`modelo respondeu ${r.status}`);
+      if (!r.ok) throw new Error(`model returned ${r.status}`);
       const j = await r.json();
       return j.candidates?.[0]?.content?.parts?.map((x) => x.text).join('') || '';
     } finally { clearTimeout(t); }

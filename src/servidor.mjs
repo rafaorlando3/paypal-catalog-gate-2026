@@ -7,6 +7,8 @@ import { PayPalFixture } from './paypal-fixture.mjs';
 import { PayPalRest } from './paypal-rest.mjs';
 import { B0 } from './brief.mjs';
 import { geradorGemini } from './parecer.mjs';
+import { StoreArquivo } from './store.mjs';
+import { criarVerificador, buscarCertHttps } from './webhook.mjs';
 
 const RAIZ = new URL('..', import.meta.url);
 const MODO = process.env.MODE === 'sandbox' ? 'sandbox' : 'fixture';
@@ -18,12 +20,14 @@ const MAX_LOTE = 200 * 1024;
 
 const paypal = MODO === 'sandbox' ? new PayPalRest({ retornoUrl: `${BASE_URL}/retorno` }) : null;
 const mesas = new Map(); // one Mesa per order in fixture mode, so each visitor gets an isolated simulator
-const mesaSandbox = paypal ? new Mesa({ paypal, brief: B0, amostra: AMOSTRA }) : null;
+// Sandbox mode persists orders (DATA_DIR) and recovers them on restart. Fixture mode keeps one simulator per visitor in memory.
+const mesaSandbox = paypal ? new Mesa({ paypal, brief: B0, amostra: AMOSTRA, store: new StoreArquivo(`${process.env.DATA_DIR || './data'}/orders.json`) }) : null;
+const verificarWebhook = mesaSandbox && process.env.PAYPAL_WEBHOOK_ID ? criarVerificador({ webhookId: process.env.PAYPAL_WEBHOOK_ID, buscarCert: buscarCertHttps }) : null;
 const gerar = process.env.GEMINI_API_KEY ? geradorGemini() : async () => { throw new Error('advisory model not configured'); };
 
 function mesaDe(id) {
   if (mesaSandbox) return mesaSandbox;
-  const m = mesas.get(id); if (!m) throw new ErroRegra('PEDIDO_INEXISTENTE', id); return m;
+  const m = mesas.get(id); if (!m) throw new ErroRegra('ORDER_NOT_FOUND', id); return m;
 }
 
 function vista(m, p) {
@@ -38,7 +42,7 @@ function vista(m, p) {
 
 const corpo = (req) => new Promise((ok, falha) => {
   let n = 0; const partes = [];
-  req.on('data', (c) => { n += c.length; if (n > MAX_LOTE) { falha(new ErroRegra('GRANDE', 'lote acima de 200 KB')); req.destroy(); } else partes.push(c); });
+  req.on('data', (c) => { n += c.length; if (n > MAX_LOTE) { falha(new ErroRegra('TOO_LARGE', 'file above 200 KB')); req.destroy(); } else partes.push(c); });
   req.on('end', () => ok(Buffer.concat(partes).toString('utf8'))); req.on('error', falha);
 });
 const json = (res, st, obj) => { res.writeHead(st, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(obj)); };
@@ -55,8 +59,16 @@ async function rota(req, res) {
   if (req.method === 'GET' && u.pathname === '/retorno') {
     const token = u.searchParams.get('token');
     const p = mesaSandbox && [...mesaSandbox.pedidos.values()].find((x) => x.order_id === token);
-    if (p && p.estado === 'CRIADO') await mesaSandbox.autorizar(p.id);
+    if (p && p.estado === 'CREATED') await mesaSandbox.autorizar(p.id);
     res.writeHead(302, { location: p ? `/#${p.id}` : '/' }); return res.end();
+  }
+  if (req.method === 'POST' && u.pathname === '/webhooks/paypal') {
+    if (!verificarWebhook) return json(res, 404, { erro: 'webhooks are only enabled in sandbox mode with PAYPAL_WEBHOOK_ID' });
+    const bruto = await corpo(req);
+    const v = await verificarWebhook(req.headers, bruto);
+    if (!v.ok) return json(res, 400, { erro: `webhook rejected: ${v.motivo}` });
+    let ev; try { ev = JSON.parse(bruto); } catch { return json(res, 400, { erro: 'webhook body is not JSON' }); }
+    return json(res, 200, mesaSandbox.webhook(ev));
   }
   if (req.method === 'POST' && u.pathname === '/api/pedidos') {
     const id = randomUUID().slice(0, 8);
@@ -66,16 +78,16 @@ async function rota(req, res) {
     if (!mesaSandbox) await mesa.autorizar(id); // fixture: buyer approval is simulated and labeled
     return json(res, 201, vista(mesa, mesa.pedido(p.id)));
   }
-  if (!m) return json(res, 404, { erro: 'não encontrado' });
+  if (!m) return json(res, 404, { erro: 'not found' });
   const [, id, acao] = m; const mesa = mesaDe(id);
   if (req.method === 'GET' && !acao) return json(res, 200, vista(mesa, mesa.pedido(id)));
-  if (req.method !== 'POST') return json(res, 405, { erro: 'método' });
+  if (req.method !== 'POST') return json(res, 405, { erro: 'method not allowed' });
   const txt = await corpo(req); const dados = txt && acao !== 'entrega' ? JSON.parse(txt) : {};
   switch (acao) {
     case 'entrega': {
       const nome = u.searchParams.get('lote');
       const lote = nome ? LOTES[nome] : txt;
-      if (!lote) throw new ErroRegra('LOTE', 'lote desconhecido ou vazio');
+      if (!lote) throw new ErroRegra('FILE', 'unknown or empty file');
       mesa.entregar(id, lote); mesa.conferir(id); break;
     }
     case 'parecer': await mesa.parecer(id, gerar); break;
@@ -84,11 +96,11 @@ async function rota(req, res) {
     case 'anular': await mesa.anular(id, { humano: dados.confirmo === true }); break;
     case 'reautorizar': await mesa.reautorizar(id, { humano: dados.confirmo === true }); break;
     case 'reconciliar': await mesa.reconciliar(id); break;
-    default: return json(res, 404, { erro: 'ação' });
+    default: return json(res, 404, { erro: 'unknown action' });
   }
   return json(res, 200, vista(mesa, mesa.pedido(id)));
 }
 
 createServer((req, res) => {
-  rota(req, res).catch((e) => json(res, e instanceof ErroRegra ? 409 : 500, { erro: e instanceof ErroRegra ? e.message : 'erro interno', codigo: e.codigo }));
-}).listen(PORTA, () => console.log(`modo ${MODO} em ${BASE_URL}`));
+  rota(req, res).catch((e) => json(res, e instanceof ErroRegra ? 409 : 500, { erro: e instanceof ErroRegra ? e.message : 'internal error', codigo: e.codigo }));
+}).listen(PORTA, () => console.log(`mode ${MODO} on ${BASE_URL}`));

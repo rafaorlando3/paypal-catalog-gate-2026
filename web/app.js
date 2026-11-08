@@ -10,7 +10,7 @@ const COR = { verde: 'PASS', amarelo: 'PASS WITH REJECTIONS', vermelho: 'FAIL' }
 function render(p) {
   atual = p; $('erro').innerHTML = '';
   $('ordem').textContent = p ? `Order ${p.order_id} · authorization ${p.autorizacao_id || 'pending buyer approval'}` : '';
-  $('aprovar').innerHTML = p && p.estado === 'CRIADO' && p.aprovacao_url ? `<p><a href="${esc(p.aprovacao_url)}">Approve with a PayPal sandbox buyer account</a></p>` : '';
+  $('aprovar').innerHTML = p && p.estado === 'CREATED' && p.aprovacao_url ? `<p><a href="${esc(p.aprovacao_url)}">Approve with a PayPal sandbox buyer account</a></p>` : '';
   const r = p?.relatorio;
   if (r) {
     const linhas = [...r.rejeicoes.map((x) => `<tr><td>line ${x.linha}</td><td>${esc(x.campo)}</td><td>${esc(x.motivo)}</td></tr>`),
@@ -19,13 +19,13 @@ function render(p) {
     $('relatorio').innerHTML = `<p class="big v-${r.veredito}">${COR[r.veredito]}</p><p>Rows read ${r.lidas} · valid ${r.validas} (minimum ${r.minimo_validas}) · sample ${r.amostra.filter((a) => a.confere).length}/${r.amostra.length} · file sha256 <code>${r.lote_sha256.slice(0, 12)}…</code></p>${r.motivos.length ? `<p>Reasons: ${esc(r.motivos.join('; '))}</p>` : ''}${linhas ? `<table><thead><tr><th>Where</th><th>Field</th><th>Finding</th></tr></thead><tbody>${linhas}</tbody></table>` : ''}`;
   } else $('relatorio').textContent = 'No delivery yet.';
   const par = p?.parecer;
-  $('parecerOut').innerHTML = par ? `<p class="${par.estado === 'aceito' ? '' : 'warn'}">${esc(par.estado === 'aceito' ? par.texto : par.estado === 'rejeitado' ? `Advisory rejected by the checker: ${par.motivo}` : 'Advisory unavailable. The rules above are unaffected.')}</p>` : '';
+  $('parecerOut').innerHTML = par ? `<p class="${par.estado === 'accepted' ? '' : 'warn'}">${esc(par.estado === 'accepted' ? par.texto : par.estado === 'rejected' ? `Advisory rejected by the checker: ${par.motivo}` : 'Advisory unavailable. The rules above are unaffected.')}</p>` : '';
   $('avisos').innerHTML = (p?.avisos || []).concat((p?.alertas || []).map((a) => a.msg)).map((a) => `<p class="warn">${esc(a)}</p>`).join('');
-  const amarelo = p?.estado === 'CONFERIDO' && p.cor === 'amarelo';
+  const amarelo = p?.estado === 'CHECKED' && p.cor === 'amarelo';
   $('liBox').hidden = !amarelo; $('liTxt').textContent = amarelo ? `I read the ${r.rejeicoes.length} rejected rows and accept the delivery.` : '';
   $('capturar').disabled = !(p?.captura_disponivel) || (amarelo && !$('li').checked);
   $('estado').textContent = p ? `State: ${p.estado}${p.capture_id ? ` · capture ${p.capture_id}` : ''}` : '';
-  $('trilha').textContent = (p?.trilha || []).map((t) => `${t.t}  ${t.estado.padEnd(17)} ${t.evento}${t.motivo ? ` (${t.motivo})` : ''}${t.msg ? ` (${t.msg})` : ''}`).join('\n');
+  $('trilha').textContent = (p?.trilha || []).map((t) => `${t.t}  ${t.estado.padEnd(18)} ${t.evento}${t.motivo ? ` (${t.motivo})` : ''}${t.msg ? ` (${t.msg})` : ''}`).join('\n');
 }
 async function agir(fn) { try { render(await fn()); } catch (e) { $('erro').innerHTML = `<p class="err">${esc(e.message)}</p>`; } }
 

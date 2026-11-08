@@ -35,35 +35,35 @@ test('V1 verde: um clique humano gera 1 captura integral', async () => {
   const r = p().relatorio;
   assert.equal(r.lote_sha256, SHA['L0.csv']);
   assert.deepEqual([r.lidas, r.validas, r.rejeicoes.length, r.duplicatas.length, r.amostra.filter((a) => a.confere).length, r.veredito], [200, 200, 0, 0, 10, 'verde']);
-  await assert.rejects(mesa.capturar('P0'), (e) => e.codigo === 'SEM_CLIQUE_HUMANO');
+  await assert.rejects(mesa.capturar('P0'), (e) => e.codigo === 'NO_HUMAN_CLICK');
   await mesa.capturar('P0', { humano: true });
-  assert.equal(p().estado, 'CAPTURADO');
+  assert.equal(p().estado, 'CAPTURED');
   assert.equal(pp.posts[0].payload.final_capture, true);
-  assert.equal(pp.posts[0].payload.amount, undefined, 'sem amount = valor total autorizado');
+  assert.deepEqual(pp.posts[0].payload.amount, { currency_code: 'USD', value: '50.00' }, 'full authorized amount, stated explicitly');
   assert.deepEqual([p().contadores.posts_capture, p().contadores.capturas_ok], [1, 1]);
 });
 
 test('V2 amarelo aceito: exige "li as 3 rejeições"', async () => {
   const { mesa, p } = await montar('L0-V2.csv');
-  assert.deepEqual(p().relatorio.rejeicoes, [{ linha: 46, campo: 'precio', motivo: 'obrigatório' }, { linha: 121, campo: 'precio', motivo: 'obrigatório' }, { linha: 178, campo: 'precio', motivo: 'obrigatório' }]);
+  assert.deepEqual(p().relatorio.rejeicoes, [{ linha: 46, campo: 'precio', motivo: 'required' }, { linha: 121, campo: 'precio', motivo: 'required' }, { linha: 178, campo: 'precio', motivo: 'required' }]);
   assert.equal(p().relatorio.validas, 197); assert.equal(p().cor, 'amarelo');
   await mesa.capturar('P0', { humano: true });
   assert.equal(p().contadores.posts_capture, 0, 'sem a caixa marcada não envia');
   await mesa.capturar('P0', { humano: true, li_rejeicoes: true });
-  assert.equal(p().estado, 'CAPTURADO'); assert.equal(p().contadores.posts_capture, 1);
+  assert.equal(p().estado, 'CAPTURED'); assert.equal(p().contadores.posts_capture, 1);
 });
 
 test('V3 amarelo recusado: reentrega, 0 POST', async () => {
   const { mesa, p } = await montar('L0-V2.csv');
   mesa.pedirReentrega('P0');
-  assert.equal(p().estado, 'REENTREGA'); assert.equal(p().reentregas, 1); assert.equal(p().contadores.posts_capture, 0);
+  assert.equal(p().estado, 'REDELIVERY'); assert.equal(p().reentregas, 1); assert.equal(p().contadores.posts_capture, 0);
   mesa.entregar('P0', lote('L0.csv'));
-  assert.equal(p().estado, 'ENTREGUE');
+  assert.equal(p().estado, 'DELIVERED');
 });
 
 test('V4 vermelho cabeçalho: corpo não avaliado', async () => {
   const { mesa, p } = await montar('L0-V4.csv');
-  assert.deepEqual(p().relatorio.rejeicoes, [{ linha: 1, campo: 'precioo', motivo: 'cabeçalho' }]);
+  assert.deepEqual(p().relatorio.rejeicoes, [{ linha: 1, campo: 'precioo', motivo: 'header' }]);
   assert.equal(p().relatorio.lidas, 0); assert.equal(p().cor, 'vermelho');
   await mesa.capturar('P0', { humano: true, li_rejeicoes: true });
   assert.equal(p().contadores.posts_capture, 0);
@@ -102,9 +102,9 @@ test('F1 clique duplo: 1 POST; fixture devolve o mesmo capture_id para o mesmo R
 test('F2a resposta perdida com vínculo suficiente: CAPTURADO só depois dos GETs', async () => {
   const { mesa, p } = await montar('L0.csv', { cortarResposta: true });
   await mesa.capturar('P0', { humano: true });
-  assert.equal(p().estado, 'INCERTO'); assert.equal(p().incerto, 'capture');
+  assert.equal(p().estado, 'UNCERTAIN'); assert.equal(p().incerto, 'capture');
   await mesa.reconciliar('P0');
-  assert.equal(p().estado, 'CAPTURADO'); assert.ok(p().capture_id);
+  assert.equal(p().estado, 'CAPTURED'); assert.ok(p().capture_id);
   assert.equal(p().contadores.posts_capture, 1);
 });
 
@@ -112,33 +112,33 @@ test('F2b resposta perdida sem vínculo: segue INCERTO, alerta, zero novo POST',
   const { mesa, pp, p } = await montar('L0.csv', { cortarResposta: true, semVinculo: true });
   await mesa.capturar('P0', { humano: true });
   await mesa.reconciliar('P0');
-  assert.equal(p().estado, 'INCERTO');
-  assert.match(p().alertas.at(-1).msg, /sem vínculo verificável/);
+  assert.equal(p().estado, 'UNCERTAIN');
+  assert.match(p().alertas.at(-1).msg, /without a verifiable link/);
   await mesa.capturar('P0', { humano: true });
   await mesa.anular('P0', { humano: true });
   await mesa.reautorizar('P0', { humano: true });
-  await assert.rejects(mesa.repetirCaptura('P0'), (e) => e.codigo === 'CAPTURA_BLOQUEADA');
+  await assert.rejects(mesa.repetirCaptura('P0'), (e) => e.codigo === 'CAPTURE_BLOCKED');
   assert.equal(pp.posts.length, 1); assert.equal(p().contadores.capturas_ok, 0);
 });
 
 test('F3 simultâneas: no máximo 1 POST em voo', async () => {
   const { mesa, pp, p } = await montar('L0.csv', { atrasoMs: 30 });
   await Promise.all([mesa.capturar('P0', { humano: true }), mesa.capturar('P0', { humano: true })]);
-  assert.equal(pp.posts.length, 1); assert.equal(p().estado, 'CAPTURADO');
+  assert.equal(pp.posts.length, 1); assert.equal(p().estado, 'CAPTURED');
 });
 
 test('F4 mesmo Request-Id com payload diferente: bloqueio local, zero envio', async () => {
   const { mesa, pp, p } = await montar('L0.csv', { cortarResposta: true });
   await mesa.capturar('P0', { humano: true });
-  await assert.rejects(mesa.repetirCaptura('P0', { final_capture: true, amount: { currency_code: 'USD', value: '45.00' } }), (e) => e.codigo === 'REQUEST_ID_PAYLOAD_DIVERGENTE');
-  assert.equal(p().estado, 'INCERTO'); assert.equal(pp.posts.length, 1); assert.equal(p().contadores.posts_capture, 1);
-  assert.match(p().alertas.at(-1).msg, /payload diferente/);
+  await assert.rejects(mesa.repetirCaptura('P0', { final_capture: true, amount: { currency_code: 'USD', value: '45.00' } }), (e) => e.codigo === 'REQUEST_ID_PAYLOAD_MISMATCH');
+  assert.equal(p().estado, 'UNCERTAIN'); assert.equal(pp.posts.length, 1); assert.equal(p().contadores.posts_capture, 1);
+  assert.match(p().alertas.at(-1).msg, /different payload/);
 });
 
 test('F5 divergência local x PayPal: INCERTO(divergencia), 0 POST', async () => {
   const { mesa, pp, p } = await montar(null, { autStatus: 'VOIDED' });
   await mesa.reconciliar('P0');
-  assert.equal(p().estado, 'INCERTO'); assert.deepEqual(p().divergencia, { local: 'AUTORIZADO', paypal: 'VOIDED' });
+  assert.equal(p().estado, 'UNCERTAIN'); assert.deepEqual(p().divergencia, { local: 'AUTHORIZED', paypal: 'VOIDED' });
   await mesa.anular('P0', { humano: true });
   assert.equal(pp.posts.length, 0);
 });
@@ -149,15 +149,15 @@ test('F6 webhook duplicado e fora de ordem: só para frente', async () => {
   const E2 = { id: 'WH-2', event_type: 'PAYMENT.CAPTURE.COMPLETED', resource: { id: 'K9', status: 'COMPLETED', supplementary_data: { related_ids: { authorization_id: A1 } } } };
   const E1 = { id: 'WH-1', event_type: 'PAYMENT.AUTHORIZATION.CREATED', resource: { id: A1 } };
   assert.equal(mesa.webhook(E2).aplicado, true);
-  assert.deepEqual(mesa.webhook(E1), { aplicado: false, motivo: 'retrocesso' });
-  assert.deepEqual(mesa.webhook(E2), { aplicado: false, motivo: 'duplicado' });
-  assert.equal(p().estado, 'CAPTURADO');
+  assert.deepEqual(mesa.webhook(E1), { aplicado: false, motivo: 'backwards' });
+  assert.deepEqual(mesa.webhook(E2), { aplicado: false, motivo: 'duplicate' });
+  assert.equal(p().estado, 'CAPTURED');
 });
 
 test('F7 captura recusada: sem retry automático', async () => {
   const { mesa, p } = await montar('L0.csv', { captura: 'DECLINED' });
   await mesa.capturar('P0', { humano: true });
-  assert.equal(p().estado, 'CAPTURA_RECUSADA'); assert.equal(p().contadores.posts_capture, 1); assert.equal(p().contadores.capturas_ok, 0);
+  assert.equal(p().estado, 'CAPTURE_DECLINED'); assert.equal(p().contadores.posts_capture, 1); assert.equal(p().contadores.capturas_ok, 0);
   await mesa.capturar('P0', { humano: true });
   assert.equal(p().contadores.posts_capture, 1);
 });
@@ -166,7 +166,7 @@ test('F8 void depois de captura: bloqueado, 0 POST void', async () => {
   const { mesa, p } = await montar('L0.csv');
   await mesa.capturar('P0', { humano: true });
   await mesa.anular('P0', { humano: true });
-  assert.equal(p().estado, 'CAPTURADO'); assert.equal(p().contadores.posts_void, 0);
+  assert.equal(p().estado, 'CAPTURED'); assert.equal(p().contadores.posts_void, 0);
 });
 
 test('H1 honor period vencido: aviso; reautorização só humana e uma vez', async () => {
@@ -176,7 +176,7 @@ test('H1 honor period vencido: aviso; reautorização só humana e uma vez', asy
   await mesa.reautorizar('P0', { humano: true });
   assert.equal(p().contadores.posts_reauth, 0, 'dia 2: bloqueado');
   relogio.avancarDias(3); // dia 5
-  assert.match(mesa.avisos('P0')[0], /Honor period vencido/);
+  assert.match(mesa.avisos('P0')[0], /Honor period over/);
   assert.equal(pp.posts.length, 0);
   const A1 = p().autorizacao_id;
   await mesa.reautorizar('P0', { humano: true });
@@ -188,39 +188,39 @@ test('H1 honor period vencido: aviso; reautorização só humana e uma vez', asy
 test('H2 autorização expirada no dia 30: nada habilitado', async () => {
   const { mesa, pp, p, relogio } = await montar('L0.csv');
   relogio.avancarDias(30);
-  assert.equal(p().estado, 'EXPIRADO');
+  assert.equal(p().estado, 'EXPIRED');
   await mesa.capturar('P0', { humano: true });
   await mesa.reautorizar('P0', { humano: true });
   assert.equal(pp.posts.length, 0);
-  assert.match(mesa.avisos('P0')[0], /novo pedido/);
+  assert.match(mesa.avisos('P0')[0], /new order/);
 });
 
 test('I1 parecer cita linha inexistente: rejeitado, veredito inalterado', async () => {
   const { mesa, p } = await montar('L0-V2.csv');
   const par = await mesa.parecer('P0', async () => 'Line 250 has an empty price.');
-  assert.equal(par.estado, 'rejeitado'); assert.match(par.motivo, /250/);
+  assert.equal(par.estado, 'rejected'); assert.match(par.motivo, /250/);
   assert.equal(p().cor, 'amarelo');
   const bom = await mesa.parecer('P0', async () => 'Lines 46, 121 and 178 have an empty price.');
-  assert.equal(bom.estado, 'aceito');
+  assert.equal(bom.estado, 'accepted');
 });
 
 test('I2 modelo fora: parecer indisponível, captura como em V1', async () => {
   const { mesa, p } = await montar('L0.csv');
   const par = await mesa.parecer('P0', async () => { throw new Error('model down'); });
-  assert.equal(par.estado, 'indisponivel');
+  assert.equal(par.estado, 'unavailable');
   await mesa.capturar('P0', { humano: true });
-  assert.equal(p().estado, 'CAPTURADO');
+  assert.equal(p().estado, 'CAPTURED');
 });
 
 test('C19a captura pendente que conclui: só por GET', async () => {
   const { mesa, pp, p } = await montar('L0.csv', { captura: 'PENDING' });
   await mesa.capturar('P0', { humano: true });
-  assert.equal(p().estado, 'CAPTURA_PENDENTE'); assert.equal(p().contadores.capturas_ok, 0);
+  assert.equal(p().estado, 'CAPTURE_PENDING'); assert.equal(p().contadores.capturas_ok, 0);
   await mesa.capturar('P0', { humano: true });
   await mesa.anular('P0', { humano: true });
   pp.o.capturaGet = 'COMPLETED';
   await mesa.reconciliar('P0');
-  assert.equal(p().estado, 'CAPTURADO'); assert.equal(p().contadores.capturas_ok, 1); assert.equal(p().contadores.posts_capture, 1);
+  assert.equal(p().estado, 'CAPTURED'); assert.equal(p().contadores.capturas_ok, 1); assert.equal(p().contadores.posts_capture, 1);
 });
 
 for (const st of ['DECLINED', 'FAILED']) {
@@ -229,7 +229,7 @@ for (const st of ['DECLINED', 'FAILED']) {
     await mesa.capturar('P0', { humano: true });
     pp.o.capturaGet = st;
     await mesa.reconciliar('P0');
-    assert.equal(p().estado, 'CAPTURA_RECUSADA'); assert.equal(p().contadores.posts_capture, 1); assert.equal(p().contadores.capturas_ok, 0);
+    assert.equal(p().estado, 'CAPTURE_DECLINED'); assert.equal(p().contadores.posts_capture, 1); assert.equal(p().contadores.capturas_ok, 0);
   });
 }
 
