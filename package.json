@@ -1,0 +1,15 @@
+{
+  "name": "catalog-gate",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Authorize up front, capture the full amount only after a catalog import passes agreed rules and a person confirms (PayPal sandbox).",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "fixtures": "node src/gerar_l0.mjs fixtures/L0",
+    "start": "node src/servidor.mjs",
+    "start:sandbox": "MODE=sandbox node src/servidor.mjs"
+  }
+}
