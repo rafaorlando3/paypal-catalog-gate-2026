@@ -1,6 +1,6 @@
 # Catalog Gate (working name)
 
-Pay for a catalog import only when it passes. The buyer's PayPal payment is **authorized** when the job starts and **captured in full** only after the delivered CSV passes rules agreed in advance **and** a person clicks capture. The rules decide; an AI model only explains the findings and must cite real line numbers, or its text is rejected.
+Pay for a catalog import only when it passes. The buyer's PayPal payment is **authorized** when the job starts and **captured in full** only after the delivered CSV passes rules agreed in advance **and** a person clicks capture. The rules decide; an AI model only explains the findings. A checker rejects any explanation that cites a line outside the file or a line without a finding. That check is about citations only: it does not prove that the explanation is semantically right.
 
 Authorize/capture is not escrow and not a licensed custody service. Everything here runs on the PayPal **sandbox** (test money) or in **fixture** mode (simulated PayPal responses, clearly labeled, no receipt).
 
@@ -8,19 +8,26 @@ Authorize/capture is not escrow and not a licensed custody service. Everything h
 
 ```bash
 node --version   # 22+
-npm test         # 19 scenarios (V1-V6, F1-F8, H1-H2, I1-I2, C19), fixture mode
-npm start        # http://localhost:8787 , fixture mode
+npm test         # 53 tests: the 19 scenarios (V1-V6, F1-F8, H1-H2, I1-I2, C19) plus restart, isolation and HTTP tests; no PayPal call
+npm start        # http://localhost:8787 , fixture mode (public)
+npm run demo:ai  # defective lots: rules verdict, fixed template explanation, model explanation (only with GEMINI_API_KEY), checker
 ```
 
 Sandbox mode (needs a PayPal developer sandbox app):
 
 ```bash
 export PAYPAL_CLIENT_ID=... PAYPAL_CLIENT_SECRET=...   # sandbox only; never commit
+export OPERATOR_TOKEN_SHA256=...                        # sha256 hex of the operator token; the token itself is never stored
 export BASE_URL=https://your-host                       # PayPal returns the buyer here after approval
+export DATA_DIR=/var/lib/catalog-gate-sandbox           # not shared with any other process
 npm run start:sandbox
 ```
 
-Optional advisory model: `GEMINI_API_KEY` (and `GEMINI_MODEL`). Without it the UI shows "advisory unavailable" and nothing else changes.
+The REST client talks only to `https://api-m.sandbox.paypal.com`: there is no production switch and no base override, and redirects are refused so credentials never leave that origin.
+
+Run fixture and sandbox as two separate processes. The fixture is public: one simulator per order, each order bound to the visitor's session (another visitor gets "not found"), a cap on orders per session. The sandbox is protected: every order route needs the operator login, and the login gets a new session id. In both modes every POST needs the session cookie (HttpOnly, SameSite=Strict), the per-session CSRF token in `X-CG-CSRF` and a same-origin `Origin` header. The signed PayPal webhook is the only POST without a session.
+
+Optional advisory model: `GEMINI_API_KEY` (and `GEMINI_MODEL`). Without it the UI shows "advisory unavailable" and nothing else changes. Model calls are capped per order, per session and per day (`LLM_MAX_PER_ORDER`=3, `LLM_MAX_PER_SESSION`=5, `LLM_MAX_PER_DAY`=50), counted before the call.
 
 ## How it works
 
@@ -30,12 +37,12 @@ Optional advisory model: `GEMINI_API_KEY` (and `GEMINI_MODEL`). Without it the U
 4. **Explain**: the model sees only the report, never the raw file. A checker rejects any citation outside the file or without a finding.
 5. **Capture**: one human click sends `POST /v2/payments/authorizations/{id}/capture` with the full authorized amount stated explicitly and `final_capture: true`. No partial capture.
 
-Safety rules in code (`src/pedido.mjs`): a deterministic UUID-shaped PayPal-Request-Id derived from (order, operation, authorization) and a stored payload hash (same id with a different payload is blocked locally); per-order lock; lost response goes to UNCERTAIN and is reconciled by GET only, with the capture linked back to the authorization; PENDING capture is not counted as received; no void after capture; one reauthorization, by a human, days 4 to 29; expired on day 30; webhooks deduplicated and applied forward only.
+Safety rules in code (`src/pedido.mjs`): every external call (create, authorize, capture, void, reauthorize) is journaled before it is sent: intent, a deterministic UUID-shaped PayPal-Request-Id derived from (order, operation, authorization), the payload hash and an in-flight state. The same id with a different payload is blocked locally. A lost answer, or a restart while a request was in flight, leaves an operation-specific UNCERTAIN state that blocks every other action. It is settled by GET where a GET can settle it (authorize by GET order, capture and void by GET authorization and capture). Otherwise a person may resend the same journaled request with the same Request-Id (create, authorize, void, reauthorize). A capture is never resent. Other rules: per-order lock; PENDING capture is not counted as received; no void after capture; one reauthorization, by a human, days 4 to 29; expired on day 30.
 
 ## Persistence and webhooks (sandbox mode)
 
-- Orders, request ids, payload hashes and processed webhook ids are kept in `DATA_DIR/orders.json`, written atomically. On restart every order is restored; an order that was in the middle of a capture POST comes back as UNCERTAIN and can only be reconciled by GET.
-- `POST /webhooks/paypal` (sandbox mode with `PAYPAL_WEBHOOK_ID`) verifies the PayPal signature with the documented self-verification (transmission id, time, webhook id and CRC32 of the raw body, SHA256withRSA against the certificate from an https paypal.com URL), deduplicates by event id and applies events forward only.
+- Orders, request ids, payload hashes, in-flight intents, the advisory counter and processed webhook ids are kept in `DATA_DIR/orders.json`, written atomically (temp file, fsync, rename). The store takes an exclusive lock file with the owner pid: a second process on the same `DATA_DIR` fails at startup, so two processes cannot send the same request; a lock left by a dead process is taken over. A test kills a real process with SIGKILL during a capture and checks that the next one restores the order as UNCERTAIN(capture) and sends nothing.
+- `POST /webhooks/paypal` (sandbox mode with `PAYPAL_WEBHOOK_ID`) verifies the PayPal signature with the documented self-verification (transmission id, time, webhook id and CRC32 of the raw body, SHA256withRSA against the certificate from an https paypal.com URL). An event is matched only through an id it actually carries (authorization id for captures, resource id for authorizations) and that is known locally; captures also need their capture id and the exact amount and currency. Anything less marks the order for GET reconciliation and changes nothing. Applied events are deduplicated by event id and only move forward; an event cannot settle an UNCERTAIN order unless it is the outcome of that operation.
 - Fixture mode keeps everything in memory and says so on screen.
 
 ## PayPal references (read 8 Nov 2026)

@@ -50,7 +50,7 @@ test('restart while a capture is in flight: UNCERTAIN, then GET reconciliation, 
   await new Promise((r) => setTimeout(r, 10));
   const m2 = new Mesa({ paypal: pp, brief: B0, amostra: AMOSTRA, store }); // the "new process"
   assert.equal(m2.pedido('P1').estado, 'UNCERTAIN');
-  assert.match(m2.pedido('P1').alertas.at(-1).msg, /Restart while a capture was in flight/);
+  assert.match(m2.pedido('P1').alertas.at(-1).msg, /Restart while a capture request was in flight/);
   await voo; // PayPal (fixture) did complete the first request
   await m2.capturar('P1', { humano: true });
   await m2.reconciliar('P1');

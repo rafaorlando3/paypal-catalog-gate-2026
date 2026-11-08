@@ -146,7 +146,7 @@ test('F5 divergência local x PayPal: INCERTO(divergencia), 0 POST', async () =>
 test('F6 webhook duplicado e fora de ordem: só para frente', async () => {
   const { mesa, p } = await montar('L0.csv');
   const A1 = p().autorizacao_id;
-  const E2 = { id: 'WH-2', event_type: 'PAYMENT.CAPTURE.COMPLETED', resource: { id: 'K9', status: 'COMPLETED', supplementary_data: { related_ids: { authorization_id: A1 } } } };
+  const E2 = { id: 'WH-2', event_type: 'PAYMENT.CAPTURE.COMPLETED', resource: { id: 'K9', status: 'COMPLETED', amount: { currency_code: 'USD', value: '50.00' }, supplementary_data: { related_ids: { authorization_id: A1 } } } };
   const E1 = { id: 'WH-1', event_type: 'PAYMENT.AUTHORIZATION.CREATED', resource: { id: A1 } };
   assert.equal(mesa.webhook(E2).aplicado, true);
   assert.deepEqual(mesa.webhook(E1), { aplicado: false, motivo: 'backwards' });

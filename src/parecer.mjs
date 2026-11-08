@@ -51,3 +51,16 @@ export function geradorGemini({ chave = process.env.GEMINI_API_KEY, modelo = pro
     } finally { clearTimeout(t); }
   };
 }
+
+/**
+ * Fixed (template) explanation built only from report C. It is the baseline the model's explanation is compared with:
+ * same facts, no model. Deterministic, so the demo can show what the model adds and what the checker catches.
+ */
+export function explicacaoFixa(rel) {
+  const VEREDITO = { verde: 'PASS', amarelo: 'PASS WITH REJECTIONS', vermelho: 'FAIL' };
+  const partes = [`Verdict ${VEREDITO[rel.veredito]}${rel.motivos.length ? ` (${rel.motivos.join('; ')})` : ''}: ${rel.validas} of ${rel.lidas} rows pass the row rules.`];
+  for (const r of rel.rejeicoes) partes.push(r.motivo === 'header' ? `Line ${r.linha}: header column "${r.campo}" differs from the brief.` : `Line ${r.linha}: ${r.campo} ${r.motivo}.`);
+  for (const d of rel.duplicatas) partes.push(`Lines ${d.linhas.join(' and ')}: duplicate key ${d.chave}.`);
+  for (const a of rel.amostra.filter((x) => !x.confere)) partes.push(`Line ${a.linha}: ${a.campo} is ${a.recebido}, the approved sample says ${a.esperado}.`);
+  return partes.join(' ');
+}

@@ -22,15 +22,16 @@ table{width:100%;border-collapse:collapse;font-size:14px}td,th{border-bottom:1px
 <h1>Catalog Gate</h1>
 <p class="mute">A buyer pays a supplier to import a product catalog. The money is authorized in PayPal up front and captured only after the delivered file passes the agreed rules and a person confirms. Rules decide; the AI only explains, citing lines. Authorize/capture is not escrow.</p>
 </header><main>
+<section class="card" id="loginBox" hidden><h2>Operator login (sandbox)</h2><div class="row"><input type="password" id="token" aria-label="Operator token" autocomplete="current-password"><button class="pri" id="entrar">Sign in</button></div></section>
 <section class="card"><h2>1. Agreed brief</h2><div id="brief" class="mute"></div></section>
-<section class="card"><h2>2. Order</h2><div class="row"><button class="pri" id="novo">Create order (USD 50.00)</button><span id="ordem" class="mute"></span></div><div id="aprovar"></div></section>
+<section class="card"><h2>2. Order</h2><div class="row"><button class="pri" id="novo">Create order (USD 50.00)</button><span id="ordem" class="mute"></span></div><div id="aprovar"></div><div class="row"><button id="autorizar" hidden>Authorize after buyer approval</button></div></section>
 <section class="card"><h2>3. Delivery</h2><div class="row"><select id="lote" aria-label="Sample delivery"></select><button id="entregar">Deliver sample file</button></div>
 <div class="row" style="margin-top:8px"><label class="mute">or upload a CSV <input type="file" id="arquivo" accept=".csv,text/csv"></label></div></section>
 <section class="card"><h2>4. Deterministic check</h2><div id="relatorio" class="mute">No delivery yet.</div></section>
 <section class="card"><h2>5. AI explanation <span class="mute">(advisory, not a decision)</span></h2><div class="row"><button id="parecer">Explain findings</button></div><div id="parecerOut" class="mute"></div></section>
 <section class="card"><h2>6. Human decision</h2><div id="avisos"></div>
 <label class="row" id="liBox" hidden><input type="checkbox" id="li"> <span id="liTxt"></span></label>
-<div class="row"><button class="pri" id="capturar" disabled>Capture full amount</button><button id="reentrega">Ask for a new delivery</button><button id="anular">Void authorization</button><button id="reconciliar">Reconcile with PayPal</button></div>
+<div class="row"><button class="pri" id="capturar" disabled>Capture full amount</button><button id="reentrega">Ask for a new delivery</button><button id="anular">Void authorization</button><button id="reautorizar">Reauthorize (day 4 to 29, once)</button><button id="reconciliar">Reconcile with PayPal (GET only)</button><button id="reenviar" hidden>Resend the same request (same Request-Id)</button></div>
 <p class="big" id="estado"></p><div id="erro"></div></section>
 <section class="card"><h2>Audit trail</h2><div class="trail" id="trilha"></div></section>
 </main><script src="/app.js"></script></body></html>

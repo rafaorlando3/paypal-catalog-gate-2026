@@ -1,7 +1,9 @@
 const $ = (id) => document.getElementById(id);
-let id = location.hash.slice(1) || null, info = null, atual = null;
+let id = location.hash.slice(1) || null, info = null, atual = null, csrf = '';
 const api = async (path, opt = {}) => {
-  const r = await fetch(path, { ...opt, headers: { 'content-type': opt.raw ? 'text/csv' : 'application/json' }, body: opt.raw ?? (opt.body ? JSON.stringify(opt.body) : undefined) });
+  const headers = { 'content-type': opt.raw ? 'text/csv' : 'application/json' };
+  if (opt.method === 'POST') headers['x-cg-csrf'] = csrf; // per-session token; the server also checks Origin
+  const r = await fetch(path, { ...opt, headers, credentials: 'same-origin', body: opt.raw ?? (opt.body ? JSON.stringify(opt.body) : opt.method === 'POST' ? '{}' : undefined) });
   const j = await r.json(); if (!r.ok) throw new Error(j.erro || r.status); return j;
 };
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -24,13 +26,16 @@ function render(p) {
   const amarelo = p?.estado === 'CHECKED' && p.cor === 'amarelo';
   $('liBox').hidden = !amarelo; $('liTxt').textContent = amarelo ? `I read the ${r.rejeicoes.length} rejected rows and accept the delivery.` : '';
   $('capturar').disabled = !(p?.captura_disponivel) || (amarelo && !$('li').checked);
+  $('autorizar').hidden = !(info?.modo === 'sandbox' && p?.estado === 'CREATED');
+  $('reenviar').hidden = !(p?.estado === 'UNCERTAIN' && p.incerto && p.incerto !== 'capture');
   $('estado').textContent = p ? `State: ${p.estado}${p.capture_id ? ` · capture ${p.capture_id}` : ''}` : '';
   $('trilha').textContent = (p?.trilha || []).map((t) => `${t.t}  ${t.estado.padEnd(18)} ${t.evento}${t.motivo ? ` (${t.motivo})` : ''}${t.msg ? ` (${t.msg})` : ''}`).join('\n');
 }
 async function agir(fn) { try { render(await fn()); } catch (e) { $('erro').innerHTML = `<p class="err">${esc(e.message)}</p>`; } }
 
 (async () => {
-  info = await api('/api/info');
+  info = await api('/api/info'); csrf = info.csrf;
+  $('loginBox').hidden = !(info.login_exigido && !info.operador);
   $('modo').textContent = info.modo === 'sandbox' ? 'PayPal SANDBOX (test money)' : 'FIXTURE: simulated PayPal responses, no receipt';
   $('brief').innerHTML = `Columns: ${info.brief.colunas.map((c) => `<code>${c.nome}</code>`).join(', ')} · ${info.brief.linhas_esperadas} rows · tolerance ${info.brief.tolerancia_rejeicao * 100}% · key <code>${info.brief.chave}</code> · approved sample: data lines 2 to 11.`;
   $('lote').innerHTML = info.lotes.map((n) => `<option>${n}</option>`).join('');
@@ -45,3 +50,10 @@ $('capturar').onclick = () => agir(() => api(`/api/pedidos/${id}/capturar`, { me
 $('reentrega').onclick = () => agir(() => api(`/api/pedidos/${id}/reentrega`, { method: 'POST', body: {} }));
 $('anular').onclick = () => agir(() => api(`/api/pedidos/${id}/anular`, { method: 'POST', body: { confirmo: true } }));
 $('reconciliar').onclick = () => agir(() => api(`/api/pedidos/${id}/reconciliar`, { method: 'POST', body: {} }));
+$('reautorizar').onclick = () => agir(() => api(`/api/pedidos/${id}/reautorizar`, { method: 'POST', body: { confirmo: true } }));
+$('reenviar').onclick = () => agir(() => api(`/api/pedidos/${id}/reenviar`, { method: 'POST', body: { confirmo: true } }));
+$('autorizar').onclick = () => agir(() => api(`/api/pedidos/${id}/autorizar`, { method: 'POST', body: {} }));
+$('entrar').onclick = async () => {
+  try { const r = await api('/api/login', { method: 'POST', body: { token: $('token').value } }); csrf = r.csrf; $('token').value = ''; $('loginBox').hidden = true; if (id) agir(() => api(`/api/pedidos/${id}`)); }
+  catch (e) { $('erro').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+};
