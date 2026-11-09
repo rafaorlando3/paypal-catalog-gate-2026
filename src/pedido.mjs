@@ -12,6 +12,11 @@
 import { createHash } from 'node:crypto';
 import { validar } from './validar.mjs';
 import { checarParecer } from './parecer.mjs';
+import { extrairAchados, linhasDe } from './c3/achados.mjs';
+import { propostaB1 } from './c3/b1.mjs';
+import { montarPrompt, validarResposta, checarProposta, sha as shaTexto } from './c3/sugestoes.mjs';
+import { IA_DESLIGADA } from './c3/adaptador.mjs';
+import { textoReentrega } from './c3/reentrega.mjs';
 
 const sha256 = (t) => createHash('sha256').update(t).digest('hex');
 const DIA = 86400000;
@@ -217,7 +222,7 @@ export class Mesa {
     const p = this.pedido(id);
     if (!['AUTHORIZED', 'REDELIVERY'].includes(p.estado)) throw new ErroRegra('STATE', `delivery needs AUTHORIZED or REDELIVERY, order is ${p.estado}`);
     p.lote = lote; p.lote_sha256 = sha256(lote); p.estado = 'DELIVERED';
-    delete p.relatorio; delete p.parecer; delete p.cor;
+    delete p.relatorio; delete p.parecer; delete p.cor; delete p.sugestoes;
     this.#registrar(p, 'file delivered', { lote_sha256: p.lote_sha256 });
     this.#salvar();
     return p;
@@ -259,6 +264,78 @@ export class Mesa {
     this.#registrar(p, `advisory ${p.parecer.estado}`, chk.ok ? {} : { motivo: chk.motivo });
     this.#salvar();
     return p.parecer;
+  }
+
+  // ---------- C3: suggested fixes for a supplier redelivery request (never change lot, report, verdict or payment) ----------
+  #chavesDo(lote) {
+    const j = this.brief.colunas.findIndex((c) => c.nome === this.brief.chave);
+    return new Set(linhasDe(lote).slice(1).map((l) => l.split(',')[j]).filter(Boolean));
+  }
+
+  /**
+   * Builds suggestions for every finding: B1 always, the AI adapter only when enabled and within the advisory budget
+   * (shared with the explanation). Model proposals pass validarResposta and checarProposta; a person accepts each one.
+   */
+  async sugerir(id, { ia = IA_DESLIGADA } = {}) {
+    return this.#trava(id, async () => {
+      const p = this.pedido(id);
+      if (!p.relatorio || !p.lote) throw new ErroRegra('STATE', 'suggestions need a checked delivery');
+      const achados = extrairAchados(p.relatorio, p.lote, this.brief);
+      const chaves = this.#chavesDo(p.lote);
+      const corte = (t) => (t.length > 200 ? `${t.slice(0, 200)}…` : t);
+      const itens = achados.map((a) => ({ sid: a.id, tipo: a.tipo, linha: a.linha, ...(a.linhas ? { linhas: a.linhas } : {}), campo: a.campo, original: corte(a.original), b1: propostaB1(a, { brief: this.brief, chaves }), ia: null, decisao: null }));
+      let estadoIA = { estado: 'disabled', motivo: ia.motivo || 'AI suggestions are off' };
+      if (ia.habilitado === true && achados.length) {
+        const hoje = new Date(this.agora()).toISOString().slice(0, 10);
+        if (this.uso.dia !== hoje) this.uso = { dia: hoje, chamadas: 0 };
+        p.contadores.pareceres ??= 0;
+        if (p.contadores.pareceres >= this.limiteParecer.porPedido || this.uso.chamadas >= this.limiteParecer.porDia) estadoIA = { estado: 'unavailable', motivo: 'advisory budget reached' };
+        else {
+          p.contadores.pareceres++; this.uso.chamadas++; this.#salvar(); // counted before the call
+          const prompt = montarPrompt(achados, this.brief);
+          let bruto;
+          try { bruto = await ia.propor(prompt); } catch (e) { estadoIA = { estado: 'unavailable', motivo: String(e.message || e).slice(0, 120), modelo: ia.modelo, prompt_sha256: shaTexto(prompt) }; }
+          if (bruto !== undefined) {
+            const v = validarResposta(bruto, achados);
+            estadoIA = { estado: v.ok ? 'checked' : 'rejected', ...(v.ok ? {} : { motivo: v.motivo }), modelo: ia.modelo, prompt_sha256: shaTexto(prompt), resposta_sha256: shaTexto(bruto) };
+            if (v.ok) for (const it of itens) {
+              const prop = v.itens.get(it.sid); if (!prop) continue;
+              const chk = checarProposta(achados.find((a) => a.id === it.sid), prop, { brief: this.brief, chaves });
+              it.ia = { acao: prop.acao, valor: prop.valor, nota_do_modelo: prop.motivo, aceita_pelo_checador: chk.aceita, ...(chk.motivo_recusa ? { motivo_recusa: chk.motivo_recusa } : {}), semantica: chk.semantica };
+            }
+          }
+        }
+      }
+      p.sugestoes = { lote_sha256: p.lote_sha256, gerado_em: new Date(this.agora()).toISOString(), ia: estadoIA, itens };
+      this.#registrar(p, 'suggestions built', { achados: itens.length, ia: estadoIA.estado });
+      this.#salvar();
+      return p.sugestoes;
+    });
+  }
+
+  /** A person accepts (or not) one suggestion for the redelivery request. Nothing else changes. */
+  decidirSugestao(id, sid, { fonte, aceitar, humano = false } = {}) {
+    if (!humano) throw new ErroRegra('NO_HUMAN_CLICK', 'a suggestion is accepted only by a person');
+    const p = this.pedido(id);
+    if (!p.sugestoes || p.sugestoes.lote_sha256 !== p.lote_sha256) throw new ErroRegra('STATE', 'no suggestions for the current delivery');
+    const it = p.sugestoes.itens.find((x) => x.sid === sid);
+    if (!it) throw new ErroRegra('NOT_FOUND', 'unknown suggestion');
+    if (aceitar !== true) { it.decisao = { aceitar: false, em: new Date(this.agora()).toISOString() }; }
+    else {
+      const prop = fonte === 'b1' ? it.b1 : fonte === 'ia' ? (it.ia?.aceita_pelo_checador ? it.ia : null) : null;
+      if (!prop || prop.acao !== 'corrigir') throw new ErroRegra('STATE', 'only a checked correction can be accepted');
+      it.decisao = { aceitar: true, fonte, valor: prop.valor, em: new Date(this.agora()).toISOString() };
+    }
+    this.#registrar(p, 'suggestion decided', { sid, aceitar: it.decisao.aceitar, fonte: it.decisao.fonte });
+    this.#salvar();
+    return it;
+  }
+
+  /** Fixed-template redelivery request (es or pt) built from the accepted suggestions. No model text is used. */
+  pedidoReentrega(id, idioma = 'es') {
+    const p = this.pedido(id);
+    if (!p.sugestoes || p.sugestoes.lote_sha256 !== p.lote_sha256) throw new ErroRegra('STATE', 'no suggestions for the current delivery');
+    return textoReentrega(p.sugestoes, idioma, this.brief);
   }
 
   podeCapturar(p, { li_rejeicoes = false } = {}) {

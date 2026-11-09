@@ -23,6 +23,15 @@ function render(p) {
   const par = p?.parecer;
   $('parecerOut').innerHTML = par ? `<p class="${par.estado === 'accepted' ? '' : 'warn'}">${esc(par.estado === 'accepted' ? par.texto : par.estado === 'rejected' ? `Advisory rejected by the checker: ${par.motivo}` : 'Advisory unavailable. The rules above are unaffected.')}</p>` : '';
   $('avisos').innerHTML = (p?.avisos || []).concat((p?.alertas || []).map((a) => a.msg)).map((a) => `<p class="warn">${esc(a)}</p>`).join('');
+  const sg = p?.sugestoes;
+  $('iaEstado').textContent = sg ? `Rule-based suggestions (B1) always; AI: ${sg.ia.estado}${sg.ia.motivo ? ` (${sg.ia.motivo})` : ''}` : (info?.sugestoes_ia ? '' : 'AI suggestions are off in this build.');
+  const prop = (x) => !x ? 'n/a' : x.acao === 'corrigir' ? `"${x.valor}"` : 'ask the supplier';
+  $('sugOut').innerHTML = sg ? `<table><thead><tr><th>Where</th><th>Received</th><th>Rule-based</th><th>AI (checked)</th><th>Use in request</th></tr></thead><tbody>${sg.itens.map((it) => {
+    const opIA = it.ia && it.ia.aceita_pelo_checador && it.ia.acao === 'corrigir';
+    const atual = it.decisao?.aceitar ? it.decisao.fonte : '';
+    return `<tr><td>line ${it.linha} · ${esc(it.campo)}</td><td><code>${esc(it.original)}</code></td><td>${esc(prop(it.b1))}</td><td>${it.ia ? `${esc(prop(it.ia))}${it.ia.aceita_pelo_checador ? (it.ia.semantica ? ' · word reading, check it' : '') : ` · refused: ${esc(it.ia.motivo_recusa)}`}` : '-'}</td><td><select data-sid="${esc(it.sid)}" aria-label="Use in request"><option value="">generic request</option>${it.b1.acao === 'corrigir' ? `<option value="b1"${atual === 'b1' ? ' selected' : ''}>rule-based value</option>` : ''}${opIA ? `<option value="ia"${atual === 'ia' ? ' selected' : ''}>AI value</option>` : ''}</select></td></tr>`;
+  }).join('')}</tbody></table>` : '';
+  for (const el of document.querySelectorAll('#sugOut select')) el.onchange = () => agir(() => api(`/api/pedidos/${id}/decidir_sugestao`, { method: 'POST', body: { sid: el.dataset.sid, fonte: el.value || undefined, aceitar: !!el.value, confirmo: true } }));
   const amarelo = p?.estado === 'CHECKED' && p.cor === 'amarelo';
   $('liBox').hidden = !amarelo; $('liTxt').textContent = amarelo ? `I read the ${r.rejeicoes.length} rejected rows and accept the delivery.` : '';
   $('capturar').disabled = !(p?.captura_disponivel) || (amarelo && !$('li').checked);
@@ -55,3 +64,5 @@ $('entrar').onclick = async () => {
   try { const r = await api('/api/login', { method: 'POST', body: { token: $('token').value } }); csrf = r.csrf; $('token').value = ''; $('loginBox').hidden = true; if (id) agir(() => api(`/api/pedidos/${id}`)); }
   catch (e) { $('erro').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 };
+$('sugerir').onclick = () => agir(() => api(`/api/pedidos/${id}/sugerir`, { method: 'POST', body: {} }));
+$('montarPedido').onclick = () => agir(async () => { const r = await api(`/api/pedidos/${id}/pedido_reentrega`, { method: 'POST', body: { idioma: $('idioma').value } }); $('pedidoTxt').textContent = r.texto_reentrega; return r; });

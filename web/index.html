@@ -12,6 +12,7 @@ button.pri{background:var(--acc);color:#fff;border-color:var(--acc)}button:disab
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.mute{color:var(--mute);font-size:13px}
 .v-verde{color:var(--g)}.v-amarelo{color:var(--y)}.v-vermelho{color:var(--r)}.big{font-size:20px;font-weight:700}
 table{width:100%;border-collapse:collapse;font-size:14px}td,th{border-bottom:1px solid var(--line);padding:6px;text-align:left;vertical-align:top}
+.scroll{overflow-x:auto;max-width:100%}#sugOut td{overflow-wrap:anywhere}#sugOut select{max-width:9rem}
 .trail{font-family:ui-monospace,Menlo,monospace;font-size:12px;max-height:240px;overflow:auto;white-space:pre-wrap}
 .warn{background:#fff6e0;border:1px solid #f0d9a0;padding:8px;border-radius:8px}
 .err{background:#fde8e6;border:1px solid #f3b8b2;padding:8px;border-radius:8px}
@@ -29,6 +30,8 @@ table{width:100%;border-collapse:collapse;font-size:14px}td,th{border-bottom:1px
 <div class="row" style="margin-top:8px"><label class="mute">or upload a CSV <input type="file" id="arquivo" accept=".csv,text/csv"></label></div></section>
 <section class="card"><h2>4. Deterministic check</h2><div id="relatorio" class="mute">No delivery yet.</div></section>
 <section class="card"><h2>5. AI explanation <span class="mute">(advisory, not a decision)</span></h2><div class="row"><button id="parecer">Explain findings</button></div><div id="parecerOut" class="mute"></div></section>
+<section class="card"><h2>5b. Suggested fixes <span class="mute">(only for a redelivery request; the file, the check and the payment do not change)</span></h2><div class="row"><button id="sugerir">Suggest fixes</button><span id="iaEstado" class="mute"></span></div><div id="sugOut" class="scroll"></div>
+<div class="row" style="margin-top:8px"><select id="idioma" aria-label="Request language"><option value="es">Español</option><option value="pt">Português</option></select><button id="montarPedido">Build redelivery request</button></div><pre class="trail" id="pedidoTxt"></pre></section>
 <section class="card"><h2>6. Human decision</h2><div id="avisos"></div>
 <label class="row" id="liBox" hidden><input type="checkbox" id="li"> <span id="liTxt"></span></label>
 <div class="row"><button class="pri" id="capturar" disabled>Capture full amount</button><button id="reentrega">Ask for a new delivery</button><button id="anular">Void authorization</button><button id="reautorizar">Reauthorize (day 4 to 29, once)</button><button id="reconciliar">Reconcile with PayPal (GET only)</button></div>

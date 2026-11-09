@@ -8,7 +8,7 @@ Authorize/capture is not escrow and not a licensed custody service. Everything h
 
 ```bash
 node --version   # 22+
-npm test         # 70 tests: the 19 scenarios (V1-V6, F1-F8, H1-H2, I1-I2, C19) plus restart, isolation and HTTP tests; no PayPal call
+npm test         # 90 tests: the 19 scenarios (V1-V6, F1-F8, H1-H2, I1-I2, C19) plus restart, isolation and HTTP tests; no PayPal call
 npm start        # http://localhost:8787 , fixture mode (public)
 npm run demo:ai  # defective lots: rules verdict, fixed template explanation, model explanation (only with GEMINI_API_KEY), checker
 ```
@@ -38,6 +38,15 @@ Optional advisory model: `GEMINI_API_KEY` (and `GEMINI_MODEL`). Without it the U
 5. **Capture**: one human click sends `POST /v2/payments/authorizations/{id}/capture` with the full authorized amount stated explicitly and `final_capture: true`. No partial capture.
 
 Safety rules in code (`src/pedido.mjs`): every external call (create, authorize, capture, void, reauthorize) is journaled before it is sent: intent, a deterministic UUID-shaped PayPal-Request-Id derived from (order, operation, authorization), the payload hash and an in-flight state. The same id with a different payload is blocked locally. A lost answer, or a restart while a request was in flight, leaves an operation-specific UNCERTAIN state that blocks every other action. It is settled by GET where a GET can settle it (authorize by GET order, capture and void by GET authorization and capture). Otherwise it stays blocked with an alert for manual review. No POST is ever sent for an UNCERTAIN operation, not even by a human click, because PayPal-Request-Id retention and replay behaviour per endpoint are not qualified yet. Other rules: per-order lock; PENDING capture is not counted as received; no void after capture; one reauthorization, by a human, days 4 to 29; expired on day 30.
+
+## Suggested fixes for a redelivery request (C3, AI off by default)
+
+After a check with findings, `Suggest fixes` lists, per finding, what the supplier should change. The suggestions only feed a redelivery request written from a fixed template in Spanish or Portuguese. They never change the delivered file, the report, the verdict, the capture rules or any PayPal state, and a person accepts each one.
+
+- **Rule-based baseline (B1)**, always on: number words in Spanish and Portuguese from 0 to 999, unit words, spaces, sku case, the approved sample value, and a split decimal only when the comma-in-name reading is invalid. A currency marker or currency word always goes back to the supplier: nothing is stripped or converted.
+- **AI suggestions** are OFF. No AI provider ships in this build: the model id and price are not verified and no AI key is authorized, so environment variables cannot turn it on. The adapter takes an injected provider, has a 15 s timeout, a 16 KB answer cap and the same advisory budget as the explanation.
+- Every model answer must match a strict JSON schema. A deterministic checker refuses values for currency cells, ambiguous split lines, empty cells, keys and duplicates; when the cell has digits, only the rule-based reading is allowed; a word reading is allowed only for short cells and is flagged for the person. Supplier text is sent as data and is never followed as instructions. Model text never reaches the supplier.
+- Evaluation: `fixtures/C3` holds two development lots and two reserved lots with one label per finding, frozen with sha256 in `MANIFEST.json` before any model output existed. `npm run eval:c3` scores B1 and, if given recorded answers, the model before and after the checker. No result of the model is claimed here.
 
 ## Persistence and webhooks (sandbox mode)
 

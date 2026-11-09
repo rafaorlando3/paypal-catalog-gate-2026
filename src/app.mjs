@@ -9,9 +9,12 @@ import { randomBytes, randomUUID, createHash, timingSafeEqual } from 'node:crypt
 import { Mesa, ErroRegra } from './pedido.mjs';
 import { PayPalFixture } from './paypal-fixture.mjs';
 import { B0 } from './brief.mjs';
+import { adaptadorDoAmbiente } from './c3/adaptador.mjs';
 
 const RAIZ = new URL('..', import.meta.url);
 const LOTES = Object.fromEntries(readdirSync(new URL('fixtures/L0/', RAIZ)).filter((n) => n.startsWith('L0')).map((n) => [n, readFileSync(new URL(`fixtures/L0/${n}`, RAIZ), 'utf8')]));
+// C3 development lots are selectable in the demo; the reserved evaluation lots are never served.
+for (const n of readdirSync(new URL('fixtures/C3/', RAIZ)).filter((x) => /^C3-V\d-dev-.*\.csv$/.test(x))) LOTES[n] = readFileSync(new URL(`fixtures/C3/${n}`, RAIZ), 'utf8');
 const AMOSTRA = readFileSync(new URL('fixtures/L0/AMOSTRA-L0-linhas-2-11.csv', RAIZ), 'utf8');
 const MAX_CORPO = 200 * 1024;
 const COOKIE = 'cg_sid';
@@ -30,6 +33,7 @@ class ErroHttp extends Error { constructor(st, codigo, msg) { super(msg); this.s
  * @param {string} [c.operadorSha256]   sandbox: sha256 hex of the operator token (OPERATOR_TOKEN_SHA256)
  * @param {Function} [c.verificarWebhook] sandbox: signature verifier from webhook.mjs
  * @param {Function} [c.gerar]          advisory model call; absent means the advisory is unavailable
+ * @param {object} [c.ia]             C3 suggestion adapter; default adaptadorDoAmbiente(), which is always OFF in C3
  * @param {object} [c.limites]          { pedidosPorSessao, mesas, llmPorDia, llmPorSessao, llmPorPedido, falhasLogin }
  */
 export function criarApp(c) {
@@ -81,6 +85,19 @@ export function criarApp(c) {
     };
   }
 
+  /** The C3 adapter behind the same process-wide and per-session advisory budget as the explanation. */
+  function iaCom(s) {
+    const ia = c.ia || adaptadorDoAmbiente();
+    if (ia.habilitado !== true) return ia;
+    return { habilitado: true, modelo: ia.modelo, async propor(prompt) {
+      const hoje = new Date(agora()).toISOString().slice(0, 10);
+      if (llm.dia !== hoje) { llm.dia = hoje; llm.chamadas = 0; }
+      if (llm.chamadas >= L.llmPorDia || s.llm >= L.llmPorSessao) throw new Error('advisory budget reached');
+      llm.chamadas++; s.llm++; // counted before the call
+      return ia.propor(prompt);
+    } };
+  }
+
   // ---------- orders ----------
   function acessar(s, id) {
     if (modo === 'sandbox') {
@@ -99,7 +116,7 @@ export function criarApp(c) {
       modo, id: p.id, estado: p.estado, cor: p.cor, valor: p.valor, moeda: p.moeda,
       order_id: p.order_id, autorizacao_id: p.autorizacao_id, capture_id: p.capture_id, aprovacao_url: p.aprovacao_url,
       relatorio: p.relatorio, parecer: p.parecer, avisos: m.avisos(p.id), alertas: p.alertas, contadores: p.contadores,
-      reentregas: p.reentregas, incerto: p.incerto, captura_disponivel: m.podeCapturar(p, { li_rejeicoes: true })[0], trilha: p.trilha.slice(-30),
+      reentregas: p.reentregas, incerto: p.incerto, sugestoes: p.sugestoes || null, captura_disponivel: m.podeCapturar(p, { li_rejeicoes: true })[0], trilha: p.trilha.slice(-30),
     };
   }
 
@@ -121,7 +138,7 @@ export function criarApp(c) {
     if (req.method === 'GET' && u.pathname === '/app.js') { res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'x-content-type-options': 'nosniff' }); return res.end(readFileSync(new URL('web/app.js', RAIZ))); }
     if (req.method === 'GET' && u.pathname === '/api/info') {
       const sess = s || novaSessao();
-      return json(res, 200, { modo, brief: B0, lotes: Object.keys(LOTES), parecer: !!c.gerar, csrf: sess.csrf, operador: sess.operador, login_exigido: modo === 'sandbox' }, s ? {} : { 'set-cookie': cookieDe(sess) });
+      return json(res, 200, { modo, brief: B0, lotes: Object.keys(LOTES), parecer: !!c.gerar, sugestoes_ia: (c.ia || adaptadorDoAmbiente()).habilitado === true, csrf: sess.csrf, operador: sess.operador, login_exigido: modo === 'sandbox' }, s ? {} : { 'set-cookie': cookieDe(sess) });
     }
     if (req.method === 'GET' && u.pathname === '/retorno') {
       // Return from the buyer's PayPal approval. No state change on GET: the operator authorizes with a POST.
@@ -187,6 +204,12 @@ export function criarApp(c) {
       case 'anular': await mesa.anular(id, { humano }); break;
       case 'reautorizar': await mesa.reautorizar(id, { humano }); break;
       case 'reconciliar': await mesa.reconciliar(id); break;
+      case 'sugerir': await mesa.sugerir(id, { ia: iaCom(s) }); break;
+      case 'decidir_sugestao': mesa.decidirSugestao(id, String(dados.sid || ''), { fonte: dados.fonte, aceitar: dados.aceitar === true, humano }); break;
+      case 'pedido_reentrega': {
+        if (!['es', 'pt'].includes(dados.idioma)) throw new ErroRegra('LANGUAGE', 'idioma must be es or pt');
+        return json(res, 200, { ...vista(mesa, mesa.pedido(id)), texto_reentrega: mesa.pedidoReentrega(id, dados.idioma) });
+      }
       default: return json(res, 404, { erro: 'unknown action' });
     }
     return json(res, 200, vista(mesa, mesa.pedido(id)));

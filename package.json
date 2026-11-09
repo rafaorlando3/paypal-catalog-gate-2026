@@ -13,6 +13,8 @@
     "fixtures": "node src/gerar_l0.mjs fixtures/L0",
     "start": "node src/servidor.mjs",
     "start:sandbox": "MODE=sandbox node src/servidor.mjs",
-    "demo:ai": "node src/demo-ia.mjs"
+    "demo:ai": "node src/demo-ia.mjs",
+    "eval:c3": "node src/c3/avaliar.mjs",
+    "fixtures:c3": "node src/c3/gerar_c3.mjs fixtures/C3"
   }
 }
