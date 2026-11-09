@@ -1,0 +1,140 @@
+{
+  "lote": "C3-V7-dev-es.csv",
+  "conjunto": "desenvolvimento",
+  "idioma": "es",
+  "lote_sha256": "44c68b2afd75d5d027a33c892bfb2027947064ee81ece71270dbab4bd4d14f28",
+  "itens": [
+    {
+      "id": "rejeicao:20:stock",
+      "linha": 20,
+      "campo": "stock",
+      "original": "doce",
+      "esperado": {
+        "acao": "corrigir",
+        "valor": "12"
+      },
+      "categoria": "extenso_tabela"
+    },
+    {
+      "id": "rejeicao:30:stock",
+      "linha": 30,
+      "campo": "stock",
+      "original": "treinta y dos",
+      "esperado": {
+        "acao": "corrigir",
+        "valor": "32"
+      },
+      "categoria": "extenso_tabela"
+    },
+    {
+      "id": "rejeicao:40:stock",
+      "linha": 40,
+      "campo": "stock",
+      "original": "15 unidades",
+      "esperado": {
+        "acao": "corrigir",
+        "valor": "15"
+      },
+      "categoria": "unidade"
+    },
+    {
+      "id": "rejeicao:50:stock",
+      "linha": 50,
+      "campo": "stock",
+      "original": "7 u.",
+      "esperado": {
+        "acao": "corrigir",
+        "valor": "7"
+      },
+      "categoria": "unidade"
+    },
+    {
+      "id": "rejeicao:60:precio",
+      "linha": 60,
+      "campo": "precio",
+      "original": "USD 3.10",
+      "esperado": {
+        "acao": "pedir_ao_fornecedor",
+        "valor": null
+      },
+      "categoria": "moeda"
+    },
+    {
+      "id": "rejeicao:70:*",
+      "linha": 70,
+      "campo": "*",
+      "original": "ABC-0069,Producto 069,4,05,33",
+      "esperado": {
+        "acao": "corrigir",
+        "valor": "ABC-0069,Producto 069,4.05,33"
+      },
+      "categoria": "decimal_partido_inequivoco"
+    },
+    {
+      "id": "rejeicao:80:*",
+      "linha": 80,
+      "campo": "*",
+      "original": "ABC-0079,Producto 079,2,85,3",
+      "esperado": {
+        "acao": "pedir_ao_fornecedor",
+        "valor": null
+      },
+      "categoria": "decimal_partido_ambiguo"
+    },
+    {
+      "id": "rejeicao:90:precio",
+      "linha": 90,
+      "campo": "precio",
+      "original": "",
+      "esperado": {
+        "acao": "pedir_ao_fornecedor",
+        "valor": null
+      },
+      "categoria": "vazio_ou_zero"
+    },
+    {
+      "id": "rejeicao:100:stock",
+      "linha": 100,
+      "campo": "stock",
+      "original": "una docena",
+      "esperado": {
+        "acao": "corrigir",
+        "valor": "12"
+      },
+      "categoria": "expressao_quantidade"
+    },
+    {
+      "id": "rejeicao:110:stock",
+      "linha": 110,
+      "campo": "stock",
+      "original": "agotado",
+      "esperado": {
+        "acao": "pedir_ao_fornecedor",
+        "valor": null
+      },
+      "categoria": "texto_sem_valor"
+    },
+    {
+      "id": "amostra:6:precio",
+      "linha": 6,
+      "campo": "precio",
+      "original": "2.58",
+      "esperado": {
+        "acao": "corrigir",
+        "valor": "2.85"
+      },
+      "categoria": "amostra"
+    },
+    {
+      "id": "rejeicao:120:stock",
+      "linha": 120,
+      "campo": "stock",
+      "original": "  9 ",
+      "esperado": {
+        "acao": "corrigir",
+        "valor": "9"
+      },
+      "categoria": "espacos"
+    }
+  ]
+}

@@ -1,0 +1,67 @@
+{
+  "schema": "catalog-gate.c3-eval-manifest/1",
+  "congelado_em_utc": "2026-11-09T04:00:22.354Z",
+  "baseline_B1_congelado_no_commit": "056c3ce",
+  "gerador": "src/c3/gerar_c3.mjs",
+  "conjuntos": {
+    "desenvolvimento": [
+      "C3-V7-dev-es",
+      "C3-V8-dev-pt"
+    ],
+    "reservado": [
+      "C3-H1-reservado-es",
+      "C3-H2-reservado-pt"
+    ]
+  },
+  "arquivos": {
+    "C3-H1-reservado-es.csv": {
+      "sha256": "f5bc7d90add13d7b4d45a88ee1c22feb221ee55d95acbc2b5410d0140e9d2c8e",
+      "bytes": 6294
+    },
+    "C3-H1-reservado-es.gabarito.json": {
+      "sha256": "9e7ca8ca8943dd32cdf43ce1664329da180dd019f5678aee6f54a48cca468a03",
+      "bytes": 3579
+    },
+    "C3-H2-reservado-pt.csv": {
+      "sha256": "0609d8fe4a21147dcdc956e5148d01a988302b83be9d4f39dd352d5d64dfc8f5",
+      "bytes": 6281
+    },
+    "C3-H2-reservado-pt.gabarito.json": {
+      "sha256": "b0834080805b24693fedc10c416247481534844d4b6047110e5c4ba933b6f6ac",
+      "bytes": 3525
+    },
+    "C3-V7-dev-es.csv": {
+      "sha256": "44c68b2afd75d5d027a33c892bfb2027947064ee81ece71270dbab4bd4d14f28",
+      "bytes": 6196
+    },
+    "C3-V7-dev-es.gabarito.json": {
+      "sha256": "dc58c26514a39ef661fbb55559daddb922e6a69416d08da4269ce352c55fa712",
+      "bytes": 3074
+    },
+    "C3-V8-dev-pt.csv": {
+      "sha256": "0368d35da600ba2cd22e8d577a114b994a933742f9e459b1306fac11caf87a8b",
+      "bytes": 6268
+    },
+    "C3-V8-dev-pt.gabarito.json": {
+      "sha256": "af9cb2a227a4bbce81e41f5f797792a623084afb8a1db4b4592f25d4d5cd7228",
+      "bytes": 2868
+    }
+  },
+  "declaracoes": [
+    "Labels and sha256 of the reserved set are fixed in this commit, before any model output exists. No model output exists anywhere in this repository.",
+    "The reserved set was written by the same author as B1 and the future prompt (Claude). That is an independence limit: Codex or Argon may add a further reserved set before any live run.",
+    "Labels are what a careful buyer would accept. Medium-confidence labels carry a note.",
+    "A label of pedir_ao_fornecedor means no value may be proposed; proposing one counts as invented."
+  ],
+  "criterio_pre_registrado_V2": {
+    "fonte": "PAYPAL-C3-PLANO-IA-V2-20261109.json (sha256 8db0185aa7578c03fda395b9ccfc2462a68d631a2c5eea1f68c6b24df7e40b28)",
+    "alegar_utilidade_somente_se": [
+      "A+chk has at least 3 more correct than B1 on the reserved set",
+      "A+chk has zero invented",
+      "A+chk wrong <= B1 wrong",
+      "at least 4 of 5 runs identical"
+    ],
+    "senao": "report that the model added nothing over B1 on this test; no claim of significant AI use from suggestions",
+    "resultados_negativos_sao_reportados": true
+  }
+}
