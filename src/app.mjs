@@ -9,7 +9,7 @@ import { randomBytes, randomUUID, createHash, timingSafeEqual } from 'node:crypt
 import { Mesa, ErroRegra } from './pedido.mjs';
 import { PayPalFixture } from './paypal-fixture.mjs';
 import { B0 } from './brief.mjs';
-import { adaptadorDoAmbiente } from './c3/adaptador.mjs';
+import { adaptadorDoAmbiente, erroIA } from './c3/adaptador.mjs';
 
 const RAIZ = new URL('..', import.meta.url);
 const LOTES = Object.fromEntries(readdirSync(new URL('fixtures/L0/', RAIZ)).filter((n) => n.startsWith('L0')).map((n) => [n, readFileSync(new URL(`fixtures/L0/${n}`, RAIZ), 'utf8')]));
@@ -92,7 +92,7 @@ export function criarApp(c) {
     return { habilitado: true, modelo: ia.modelo, async propor(prompt) {
       const hoje = new Date(agora()).toISOString().slice(0, 10);
       if (llm.dia !== hoje) { llm.dia = hoje; llm.chamadas = 0; }
-      if (llm.chamadas >= L.llmPorDia || s.llm >= L.llmPorSessao) throw new Error('advisory budget reached');
+      if (llm.chamadas >= L.llmPorDia || s.llm >= L.llmPorSessao) throw erroIA('advisory_budget_reached');
       llm.chamadas++; s.llm++; // counted before the call
       return ia.propor(prompt);
     } };
@@ -116,7 +116,7 @@ export function criarApp(c) {
       modo, id: p.id, estado: p.estado, cor: p.cor, valor: p.valor, moeda: p.moeda,
       order_id: p.order_id, autorizacao_id: p.autorizacao_id, capture_id: p.capture_id, aprovacao_url: p.aprovacao_url,
       relatorio: p.relatorio, parecer: p.parecer, avisos: m.avisos(p.id), alertas: p.alertas, contadores: p.contadores,
-      reentregas: p.reentregas, incerto: p.incerto, sugestoes: p.sugestoes || null, captura_disponivel: m.podeCapturar(p, { li_rejeicoes: true })[0], trilha: p.trilha.slice(-30),
+      reentregas: p.reentregas, incerto: p.incerto, lote_sha256: p.lote_sha256, revisao_entrega: p.revisao_entrega ?? 0, sugestoes: p.sugestoes || null, captura_disponivel: m.podeCapturar(p, { li_rejeicoes: true })[0], trilha: p.trilha.slice(-30),
     };
   }
 
@@ -136,6 +136,7 @@ export function criarApp(c) {
       return res.end(readFileSync(new URL('web/index.html', RAIZ)));
     }
     if (req.method === 'GET' && u.pathname === '/app.js') { res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'x-content-type-options': 'nosniff' }); return res.end(readFileSync(new URL('web/app.js', RAIZ))); }
+    if (req.method === 'GET' && u.pathname === '/vinculo-reentrega.js') { res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'x-content-type-options': 'nosniff' }); return res.end(readFileSync(new URL('web/vinculo-reentrega.js', RAIZ))); }
     if (req.method === 'GET' && u.pathname === '/api/info') {
       const sess = s || novaSessao();
       return json(res, 200, { modo, brief: B0, lotes: Object.keys(LOTES), parecer: !!c.gerar, sugestoes_ia: (c.ia || adaptadorDoAmbiente()).habilitado === true, csrf: sess.csrf, operador: sess.operador, login_exigido: modo === 'sandbox' }, s ? {} : { 'set-cookie': cookieDe(sess) });
@@ -208,7 +209,8 @@ export function criarApp(c) {
       case 'decidir_sugestao': mesa.decidirSugestao(id, String(dados.sid || ''), { fonte: dados.fonte, aceitar: dados.aceitar === true, humano }); break;
       case 'pedido_reentrega': {
         if (!['es', 'pt'].includes(dados.idioma)) throw new ErroRegra('LANGUAGE', 'idioma must be es or pt');
-        return json(res, 200, { ...vista(mesa, mesa.pedido(id)), texto_reentrega: mesa.pedidoReentrega(id, dados.idioma) });
+        const reentrega = mesa.pedidoReentregaVinculado(id, dados.idioma);
+        return json(res, 200, { ...vista(mesa, mesa.pedido(id)), reentrega, texto_reentrega: reentrega.texto });
       }
       default: return json(res, 404, { erro: 'unknown action' });
     }

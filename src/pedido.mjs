@@ -15,7 +15,7 @@ import { checarParecer } from './parecer.mjs';
 import { extrairAchados, linhasDe } from './c3/achados.mjs';
 import { propostaB1 } from './c3/b1.mjs';
 import { montarPrompt, validarResposta, checarProposta, sha as shaTexto } from './c3/sugestoes.mjs';
-import { IA_DESLIGADA } from './c3/adaptador.mjs';
+import { IA_DESLIGADA, erroPublicoIA, ERROS_IA } from './c3/adaptador.mjs';
 import { textoReentrega } from './c3/reentrega.mjs';
 
 const sha256 = (t) => createHash('sha256').update(t).digest('hex');
@@ -223,6 +223,7 @@ export class Mesa {
     if (!['AUTHORIZED', 'REDELIVERY'].includes(p.estado)) throw new ErroRegra('STATE', `delivery needs AUTHORIZED or REDELIVERY, order is ${p.estado}`);
     p.lote = lote; p.lote_sha256 = sha256(lote); p.estado = 'DELIVERED';
     delete p.relatorio; delete p.parecer; delete p.cor; delete p.sugestoes;
+    p.revisao_entrega = (p.revisao_entrega ?? 0) + 1; // C3a: suggestions are bound to this revision
     this.#registrar(p, 'file delivered', { lote_sha256: p.lote_sha256 });
     this.#salvar();
     return p;
@@ -232,6 +233,7 @@ export class Mesa {
     const p = this.pedido(id);
     if (p.estado !== 'DELIVERED') throw new ErroRegra('STATE', `check needs DELIVERED, order is ${p.estado}`);
     p.relatorio = validar(this.brief, p.lote, this.amostra);
+    p.revisao_entrega = (p.revisao_entrega ?? 0) + 1; // C3a: a new report is a new revision
     p.estado = 'CHECKED';
     p.cor = p.relatorio.veredito;
     this.#registrar(p, 'checked', { veredito: p.cor, validas: p.relatorio.validas, rejeicoes: p.relatorio.rejeicoes.length });
@@ -275,26 +277,36 @@ export class Mesa {
   /**
    * Builds suggestions for every finding: B1 always, the AI adapter only when enabled and within the advisory budget
    * (shared with the explanation). Model proposals pass validarResposta and checarProposta; a person accepts each one.
+   * C3a: the delivery (lot hash + revision) is captured before any wait. If it changed while the AI answer was pending,
+   * the whole result is discarded and nothing is stored: old output is never labelled with the new delivery.
+   * C3a: provider errors are reduced to a stable public code; their message never reaches the store or the view.
    */
   async sugerir(id, { ia = IA_DESLIGADA } = {}) {
     return this.#trava(id, async () => {
       const p = this.pedido(id);
       if (!p.relatorio || !p.lote) throw new ErroRegra('STATE', 'suggestions need a checked delivery');
-      const achados = extrairAchados(p.relatorio, p.lote, this.brief);
-      const chaves = this.#chavesDo(p.lote);
+      const base = Object.freeze({ lote_sha256: p.lote_sha256, revisao_entrega: p.revisao_entrega ?? 0, relatorio: p.relatorio, lote: p.lote });
+      const achados = extrairAchados(base.relatorio, base.lote, this.brief);
+      const chaves = this.#chavesDo(base.lote);
       const corte = (t) => (t.length > 200 ? `${t.slice(0, 200)}…` : t);
-      const itens = achados.map((a) => ({ sid: a.id, tipo: a.tipo, linha: a.linha, ...(a.linhas ? { linhas: a.linhas } : {}), campo: a.campo, original: corte(a.original), b1: propostaB1(a, { brief: this.brief, chaves }), ia: null, decisao: null }));
+      const itens = achados.map((a) => ({ sid: a.id, tipo: a.tipo, linha: a.linha, ...(a.linhas ? { linhas: a.linhas } : {}), campo: a.campo, original: corte(a.original), original_truncado: a.original.length > 200, b1: propostaB1(a, { brief: this.brief, chaves }), ia: null, decisao: null }));
       let estadoIA = { estado: 'disabled', motivo: ia.motivo || 'AI suggestions are off' };
       if (ia.habilitado === true && achados.length) {
         const hoje = new Date(this.agora()).toISOString().slice(0, 10);
         if (this.uso.dia !== hoje) this.uso = { dia: hoje, chamadas: 0 };
         p.contadores.pareceres ??= 0;
-        if (p.contadores.pareceres >= this.limiteParecer.porPedido || this.uso.chamadas >= this.limiteParecer.porDia) estadoIA = { estado: 'unavailable', motivo: 'advisory budget reached' };
+        if (p.contadores.pareceres >= this.limiteParecer.porPedido || this.uso.chamadas >= this.limiteParecer.porDia) estadoIA = { estado: 'unavailable', codigo: 'advisory_budget_reached', motivo: ERROS_IA.advisory_budget_reached };
         else {
           p.contadores.pareceres++; this.uso.chamadas++; this.#salvar(); // counted before the call
           const prompt = montarPrompt(achados, this.brief);
           let bruto;
-          try { bruto = await ia.propor(prompt); } catch (e) { estadoIA = { estado: 'unavailable', motivo: String(e.message || e).slice(0, 120), modelo: ia.modelo, prompt_sha256: shaTexto(prompt) }; }
+          try { bruto = await ia.propor(prompt); } catch (e) { estadoIA = { estado: 'unavailable', ...erroPublicoIA(e), modelo: ia.modelo, prompt_sha256: shaTexto(prompt) }; }
+          const atual = this.pedidos.get(id);
+          if (atual !== p || p.lote_sha256 !== base.lote_sha256 || (p.revisao_entrega ?? 0) !== base.revisao_entrega || p.relatorio !== base.relatorio) {
+            this.#registrar(p, 'stale suggestions discarded', { motivo: 'delivery changed while the AI answer was pending' });
+            this.#salvar();
+            return { descartado: true, motivo: 'delivery changed while the AI answer was pending', lote_sha256: base.lote_sha256, revisao_entrega: base.revisao_entrega };
+          }
           if (bruto !== undefined) {
             const v = validarResposta(bruto, achados);
             estadoIA = { estado: v.ok ? 'checked' : 'rejected', ...(v.ok ? {} : { motivo: v.motivo }), modelo: ia.modelo, prompt_sha256: shaTexto(prompt), resposta_sha256: shaTexto(bruto) };
@@ -306,19 +318,26 @@ export class Mesa {
           }
         }
       }
-      p.sugestoes = { lote_sha256: p.lote_sha256, gerado_em: new Date(this.agora()).toISOString(), ia: estadoIA, itens };
+      p.seq_sugestoes = (p.seq_sugestoes ?? 0) + 1;
+      p.sugestoes = { lote_sha256: base.lote_sha256, revisao_entrega: base.revisao_entrega, revisao: p.seq_sugestoes, gerado_em: new Date(this.agora()).toISOString(), ia: estadoIA, itens };
       this.#registrar(p, 'suggestions built', { achados: itens.length, ia: estadoIA.estado });
       this.#salvar();
       return p.sugestoes;
     });
   }
 
+  /** Suggestions exist and belong to the current delivery (same lot hash and same delivery revision). */
+  #sugestoesAtuais(p) {
+    if (!p.sugestoes || p.sugestoes.lote_sha256 !== p.lote_sha256 || p.sugestoes.revisao_entrega !== (p.revisao_entrega ?? 0)) throw new ErroRegra('STATE', 'no suggestions for the current delivery');
+    return p.sugestoes;
+  }
+
   /** A person accepts (or not) one suggestion for the redelivery request. Nothing else changes. */
   decidirSugestao(id, sid, { fonte, aceitar, humano = false } = {}) {
     if (!humano) throw new ErroRegra('NO_HUMAN_CLICK', 'a suggestion is accepted only by a person');
     const p = this.pedido(id);
-    if (!p.sugestoes || p.sugestoes.lote_sha256 !== p.lote_sha256) throw new ErroRegra('STATE', 'no suggestions for the current delivery');
-    const it = p.sugestoes.itens.find((x) => x.sid === sid);
+    const sg = this.#sugestoesAtuais(p);
+    const it = sg.itens.find((x) => x.sid === sid);
     if (!it) throw new ErroRegra('NOT_FOUND', 'unknown suggestion');
     if (aceitar !== true) { it.decisao = { aceitar: false, em: new Date(this.agora()).toISOString() }; }
     else {
@@ -326,6 +345,7 @@ export class Mesa {
       if (!prop || prop.acao !== 'corrigir') throw new ErroRegra('STATE', 'only a checked correction can be accepted');
       it.decisao = { aceitar: true, fonte, valor: prop.valor, em: new Date(this.agora()).toISOString() };
     }
+    p.seq_sugestoes = (p.seq_sugestoes ?? 0) + 1; sg.revisao = p.seq_sugestoes; // C3a: any decision is a new revision
     this.#registrar(p, 'suggestion decided', { sid, aceitar: it.decisao.aceitar, fonte: it.decisao.fonte });
     this.#salvar();
     return it;
@@ -334,8 +354,14 @@ export class Mesa {
   /** Fixed-template redelivery request (es or pt) built from the accepted suggestions. No model text is used. */
   pedidoReentrega(id, idioma = 'es') {
     const p = this.pedido(id);
-    if (!p.sugestoes || p.sugestoes.lote_sha256 !== p.lote_sha256) throw new ErroRegra('STATE', 'no suggestions for the current delivery');
-    return textoReentrega(p.sugestoes, idioma, this.brief);
+    return textoReentrega(this.#sugestoesAtuais(p), idioma, this.brief);
+  }
+
+  /** C3a: the request text together with everything it depends on, so a client can tell when it became obsolete. */
+  pedidoReentregaVinculado(id, idioma = 'es') {
+    const p = this.pedido(id);
+    const sg = this.#sugestoesAtuais(p);
+    return { pedido: p.id, lote_sha256: sg.lote_sha256, revisao_entrega: sg.revisao_entrega, revisao_sugestoes: sg.revisao, idioma, texto: textoReentrega(sg, idioma, this.brief) };
   }
 
   podeCapturar(p, { li_rejeicoes = false } = {}) {

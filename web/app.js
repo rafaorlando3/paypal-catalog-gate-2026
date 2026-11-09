@@ -1,5 +1,6 @@
 const $ = (id) => document.getElementById(id);
 let id = location.hash.slice(1) || null, info = null, atual = null, csrf = '';
+let pedidoGerado = null; // C3a: { chave, texto } of the last built request; shown only while its dependencies are unchanged
 const api = async (path, opt = {}) => {
   const headers = { 'content-type': opt.raw ? 'text/csv' : 'application/json' };
   if (opt.method === 'POST') headers['x-cg-csrf'] = csrf; // per-session token; the server also checks Origin
@@ -32,6 +33,10 @@ function render(p) {
     return `<tr><td>line ${it.linha} · ${esc(it.campo)}</td><td><code>${esc(it.original)}</code></td><td>${esc(prop(it.b1))}</td><td>${it.ia ? `${esc(prop(it.ia))}${it.ia.aceita_pelo_checador ? (it.ia.semantica ? ' · word reading, check it' : '') : ` · refused: ${esc(it.ia.motivo_recusa)}`}` : '-'}</td><td><select data-sid="${esc(it.sid)}" aria-label="Use in request"><option value="">generic request</option>${it.b1.acao === 'corrigir' ? `<option value="b1"${atual === 'b1' ? ' selected' : ''}>rule-based value</option>` : ''}${opIA ? `<option value="ia"${atual === 'ia' ? ' selected' : ''}>AI value</option>` : ''}</select></td></tr>`;
   }).join('')}</tbody></table>` : '';
   for (const el of document.querySelectorAll('#sugOut select')) el.onchange = () => agir(() => api(`/api/pedidos/${id}/decidir_sugestao`, { method: 'POST', body: { sid: el.dataset.sid, fonte: el.value || undefined, aceitar: !!el.value, confirmo: true } }));
+  // C3a: the request text is derived from its binding on every render, never left over from an earlier state.
+  const textoPedido = VinculoReentrega.textoVisivel(pedidoGerado, p, $('idioma').value);
+  if (!textoPedido) pedidoGerado = null;
+  $('pedidoTxt').textContent = textoPedido;
   const amarelo = p?.estado === 'CHECKED' && p.cor === 'amarelo';
   $('liBox').hidden = !amarelo; $('liTxt').textContent = amarelo ? `I read the ${r.rejeicoes.length} rejected rows and accept the delivery.` : '';
   $('capturar').disabled = !(p?.captura_disponivel) || (amarelo && !$('li').checked);
@@ -65,4 +70,9 @@ $('entrar').onclick = async () => {
   catch (e) { $('erro').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 };
 $('sugerir').onclick = () => agir(() => api(`/api/pedidos/${id}/sugerir`, { method: 'POST', body: {} }));
-$('montarPedido').onclick = () => agir(async () => { const r = await api(`/api/pedidos/${id}/pedido_reentrega`, { method: 'POST', body: { idioma: $('idioma').value } }); $('pedidoTxt').textContent = r.texto_reentrega; return r; });
+$('montarPedido').onclick = () => agir(async () => {
+  const r = await api(`/api/pedidos/${id}/pedido_reentrega`, { method: 'POST', body: { idioma: $('idioma').value } });
+  pedidoGerado = VinculoReentrega.gerado(r); // render(r) then shows it, because its binding matches the view it came with
+  return r;
+});
+$('idioma').onchange = () => render(atual);

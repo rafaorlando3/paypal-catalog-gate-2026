@@ -58,7 +58,7 @@ test('C3 HTTP: suggest, decide and build the request; adapter OFF by default; an
   assert.equal(d.sugestoes.itens.find((i) => i.sid === 'rejeicao:20:stock').decisao.valor, '12');
   assert.equal((await a.req('POST', `/api/pedidos/${id}/decidir_sugestao`, { corpo: { sid: 'rejeicao:20:stock', fonte: 'b1', aceitar: true } })).j.codigo, 'NO_HUMAN_CLICK');
   const r = (await a.req('POST', `/api/pedidos/${id}/pedido_reentrega`, { corpo: { idioma: 'pt' } })).j;
-  assert.match(r.texto_reentrega, /Linha 20, stock: trocar "doce" por "12"\./);
+  assert.match(r.texto_reentrega, /- Linha 20, stock \(recebido: "doce"\): usar exatamente este valor:\n {4}12\n/);
   assert.equal((await a.req('POST', `/api/pedidos/${id}/pedido_reentrega`, { corpo: { idioma: 'en' } })).j.codigo, 'LANGUAGE');
   assert.equal(r.captura_disponivel, false, 'FAIL verdict unchanged');
 });

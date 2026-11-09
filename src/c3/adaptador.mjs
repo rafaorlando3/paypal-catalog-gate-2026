@@ -3,6 +3,24 @@
 // A provider is a plain function injected by a later, separately reviewed increment (or by tests).
 import { ESQUEMA_RESPOSTA, LIMITES } from './sugestoes.mjs';
 
+/** Stable public error codes. Only these codes and their fixed texts may reach the store, the HTTP view or reports. */
+export const ERROS_IA = Object.freeze({
+  provider_timeout: 'AI provider timeout',
+  provider_error: 'AI provider error',
+  answer_not_text: 'AI provider returned no text',
+  answer_too_large: 'AI provider answer too large',
+  advisory_budget_reached: 'advisory budget reached',
+});
+export function erroIA(codigo) {
+  const c = Object.hasOwn(ERROS_IA, codigo) ? codigo : 'provider_error';
+  const e = new Error(ERROS_IA[c]); e.codigo = c; e.publico = true; return e;
+}
+/** Public form of any error thrown on the AI path: a known code with its fixed text, never the original message. */
+export function erroPublicoIA(e) {
+  const c = e && e.publico === true && Object.hasOwn(ERROS_IA, e.codigo) ? e.codigo : 'provider_error';
+  return { codigo: c, motivo: ERROS_IA[c] };
+}
+
 export const IA_DESLIGADA = Object.freeze({ habilitado: false, motivo: 'AI suggestions are off: no provider ships with C3 (model id and price not verified, no AI key authorized)' });
 
 /** Always disabled in C3. Environment variables cannot turn it on. */
@@ -24,11 +42,14 @@ export function criarAdaptadorIA({ habilitado = false, provedor, modelo, timeout
     habilitado: true, modelo, timeoutMs,
     async propor(prompt) {
       const ctrl = new AbortController(); let t;
-      const prazo = new Promise((_, rej) => { t = setTimeout(() => { ctrl.abort(); rej(new Error('AI provider timeout')); }, timeoutMs); });
+      const prazo = new Promise((_, rej) => { t = setTimeout(() => { ctrl.abort(); rej(erroIA('provider_timeout')); }, timeoutMs); });
       try {
-        const r = await Promise.race([provedor({ prompt, esquema: ESQUEMA_RESPOSTA, modelo, temperatura: 0, maxSaidaBytes, signal: ctrl.signal }), prazo]);
-        if (typeof r !== 'string') throw new Error('AI provider returned no text');
-        if (Buffer.byteLength(r) > maxSaidaBytes) throw new Error('AI provider answer too large');
+        let r;
+        // A provider error is never forwarded: its message or body could carry a key, a URL or request content.
+        try { r = await Promise.race([provedor({ prompt, esquema: ESQUEMA_RESPOSTA, modelo, temperatura: 0, maxSaidaBytes, signal: ctrl.signal }), prazo]); }
+        catch (e) { throw e?.codigo === 'provider_timeout' && e?.publico === true ? e : erroIA('provider_error'); }
+        if (typeof r !== 'string') throw erroIA('answer_not_text');
+        if (Buffer.byteLength(r) > maxSaidaBytes) throw erroIA('answer_too_large');
         return r;
       } finally { clearTimeout(t); }
     },

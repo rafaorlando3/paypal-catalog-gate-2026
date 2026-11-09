@@ -1,4 +1,4 @@
-// C3: AI adapter OFF by default, strict answer schema, deterministic checker (currency, split lines, digits,
+// C3 (request text format updated in C3a): AI adapter OFF by default, strict answer schema, deterministic checker (currency, split lines, digits,
 // injection text), shared advisory budget, fixed-template redelivery request, and the invariant that suggestions
 // never change the delivered lot, the report, the verdict, the capture rules or any PayPal state.
 // Every "model" here is a synthetic test double; nothing is a benchmark and no provider exists.
@@ -145,10 +145,10 @@ test('suggestions, decisions and the request never change the lot, report, verdi
   assert.equal(p.estado, 'CHECKED'); assert.equal(p.cor, 'vermelho');
   await m.capturar('P1', { humano: true, li_rejeicoes: true });
   assert.equal(pp.posts.length, 0, 'FAIL verdict still blocks capture after accepted suggestions');
-  assert.match(es, /Línea 100, stock: cambiar "una docena" por "12"\./);
-  assert.match(es, /Línea 20, stock: cambiar "doce" por "12"\./);
+  assert.match(es, /- Línea 100, stock \(recibido: "una docena"\): usar exactamente este valor:\n {4}12\n/);
+  assert.match(es, /- Línea 20, stock \(recibido: "doce"\): usar exactamente este valor:\n {4}12\n/);
   assert.match(es, /Línea 60, precio: indicar un número mayor que cero con punto decimal, sin moneda/);
-  assert.match(pt, /Linha 100, stock: trocar "una docena" por "12"\./);
+  assert.match(pt, /- Linha 100, stock \(recebido: "una docena"\): usar exatamente este valor:\n {4}12\n/);
   assert.ok(!es.includes('MODEL-TEXT-MARKER') && !pt.includes('MODEL-TEXT-MARKER'), 'model text never reaches the supplier');
   assert.equal(m.pedidoReentrega('P1', 'es'), es, 'deterministic');
   assert.throws(() => m.pedidoReentrega('P1', 'en'), /es or pt/);

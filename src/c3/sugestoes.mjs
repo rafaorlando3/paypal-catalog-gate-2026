@@ -54,7 +54,7 @@ export function validarResposta(bruto, achados) {
   for (const p of j.propostas) {
     if (!p || typeof p !== 'object' || Array.isArray(p)) return falha('proposal is not an object');
     const k = Object.keys(p).sort().join(',');
-    if (k !== 'acao,achado_id,motivo,valor_proposto') return falha(`proposal keys must be exactly achado_id, acao, valor_proposto, motivo (got ${k})`);
+    if (k !== 'acao,achado_id,motivo,valor_proposto') return falha('proposal keys must be exactly achado_id, acao, valor_proposto, motivo');
     if (!texto(p.achado_id) || !conhecidos.has(p.achado_id)) return falha('proposal for an unknown finding');
     if (itens.has(p.achado_id)) return falha('two proposals for one finding');
     if (p.acao === 'pedir_ao_fornecedor') { if (p.valor_proposto !== null) return falha('pedir_ao_fornecedor must have valor_proposto null'); }
