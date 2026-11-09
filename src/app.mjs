@@ -187,7 +187,6 @@ export function criarApp(c) {
       case 'anular': await mesa.anular(id, { humano }); break;
       case 'reautorizar': await mesa.reautorizar(id, { humano }); break;
       case 'reconciliar': await mesa.reconciliar(id); break;
-      case 'reenviar': await mesa.reenviarIdempotente(id, { humano }); break;
       default: return json(res, 404, { erro: 'unknown action' });
     }
     return json(res, 200, vista(mesa, mesa.pedido(id)));

@@ -1,11 +1,11 @@
-// C1b: operation-specific UNCERTAIN states for every external call, human idempotent resend, webhook matching,
+// C2/C2a: operation-specific UNCERTAIN states for every external call, zero new POST while UNCERTAIN, webhook matching,
 // advisory budget, sandbox-only REST client and the cross-process store lock (with a real SIGKILL restart).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, mkdtempSync, rmSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { Mesa } from '../src/pedido.mjs';
 import { PayPalFixture } from '../src/paypal-fixture.mjs';
 import { StoreMemoria, StoreArquivo } from '../src/store.mjs';
@@ -33,19 +33,38 @@ async function pronto(store, pp, lote = 'L0.csv', extra = {}) {
   return m;
 }
 
-test('create: lost answer gives UNCERTAIN(create); GET cannot settle it; a human resend reuses the same Request-Id', async () => {
+/**
+ * Every human action that could send a POST, tried on an UNCERTAIN order, plus two reconciliations.
+ * Returns how many new POSTs reached PayPal (must be 0). Rule C2a: no POST for an UNCERTAIN operation, ever.
+ */
+async function tentarTudo(m, pp, id = 'P1') {
+  const antes = pp.chamadas.length;
+  const ignora = (f) => f().catch(() => {});
+  await ignora(() => m.criar({ id }));
+  await ignora(() => m.autorizar(id));
+  await ignora(() => m.capturar(id, { humano: true, li_rejeicoes: true }));
+  await ignora(() => m.anular(id, { humano: true }));
+  await ignora(() => m.reautorizar(id, { humano: true }));
+  await ignora(() => m.repetirCaptura(id));
+  await ignora(() => m.reconciliar(id)); await ignora(() => m.reconciliar(id));
+  return pp.chamadas.length - antes;
+}
+
+test('no resend path exists: the engine has no resend method and the HTTP action is unknown', () => {
+  assert.equal(typeof Mesa.prototype.reenviarIdempotente, 'undefined');
+  assert.ok(!readFileSync(new URL('../src/app.mjs', import.meta.url), 'utf8').includes("'reenviar'"));
+  assert.ok(!readFileSync(new URL('../web/app.js', import.meta.url), 'utf8').includes('reenviar'));
+});
+
+test('create: lost answer gives UNCERTAIN(create); GET cannot settle it; zero new POST, blocked for manual review', async () => {
   const pp = new PayPalFixture({ cortar: ['create'] }); const m = nova(pp, new StoreMemoria());
   await m.criar({ id: 'P1' });
   assert.deepEqual([m.pedido('P1').estado, m.pedido('P1').incerto], ['UNCERTAIN', 'create']);
-  await m.reconciliar('P1');
-  assert.match(m.pedido('P1').alertas.at(-1).msg, /no GET can settle it/);
-  await assert.rejects(m.reenviarIdempotente('P1'), (e) => e.codigo === 'NO_HUMAN_CLICK');
   pp.o.cortar = [];
-  await m.reenviarIdempotente('P1', { humano: true });
-  const creates = pp.chamadas.filter((x) => x.op === 'create');
-  assert.equal(creates.length, 2); assert.equal(creates[0].requestId, creates[1].requestId);
-  assert.equal(pp.ordens.size, 1, 'PayPal (fixture) kept one order for the repeated id');
-  assert.equal(m.pedido('P1').estado, 'CREATED'); assert.equal(m.pedido('P1').order_id, [...pp.ordens.keys()][0]);
+  assert.equal(await tentarTudo(m, pp), 0);
+  assert.equal(pp.chamadas.filter((x) => x.op === 'create').length, 1);
+  assert.match(m.pedido('P1').alertas.at(-1).msg, /no GET can settle it; blocked for manual review, nothing is sent/);
+  assert.equal(m.pedido('P1').estado, 'UNCERTAIN');
 });
 
 test('authorize: restart in flight gives UNCERTAIN(authorize); GET order settles it without a second POST', async () => {
@@ -57,61 +76,69 @@ test('authorize: restart in flight gives UNCERTAIN(authorize); GET order settles
   const m2 = nova(pp, store);
   assert.deepEqual([m2.pedido('P1').estado, m2.pedido('P1').incerto], ['UNCERTAIN', 'authorize']);
   soltar(); await voo;
-  await assert.rejects(m2.capturar('P1', { humano: true }).then(() => m2.entregar('P1', ler('L0.csv'))), (e) => e.codigo === 'STATE');
-  assert.equal(m2.pedido('P1').estado, 'UNCERTAIN', 'nothing proceeds before reconciliation');
-  await m2.reconciliar('P1');
-  assert.equal(m2.pedido('P1').estado, 'AUTHORIZED');
+  assert.equal(await tentarTudo(m2, pp), 0, 'the reconciliations inside tentarTudo are GET only');
+  assert.equal(m2.pedido('P1').estado, 'AUTHORIZED', 'GET order settled it');
   assert.equal(m2.pedido('P1').autorizacao_id, [...pp.aut.keys()][0]);
   assert.equal(pp.chamadas.filter((x) => x.op === 'authorize').length, 1);
+});
+
+test('authorize: if PayPal never got it, GET shows no authorization and the order stays blocked with zero new POST', async () => {
+  const store = new StoreMemoria(); const pp = new PayPalFixture();
+  const m1 = nova(pp, store); await m1.criar({ id: 'P1' });
+  const orig = pp.autorizarPedido.bind(pp); pp.autorizarPedido = () => new Promise(() => {});
+  m1.autorizar('P1'); await espera();
+  const m2 = nova(pp, store); pp.autorizarPedido = orig;
+  assert.equal(await tentarTudo(m2, pp), 0);
+  assert.equal(m2.pedido('P1').estado, 'UNCERTAIN');
+  assert.match(m2.pedido('P1').alertas.at(-1).msg, /0 authorizations; blocked for manual review, nothing is sent/);
 });
 
 test('void: lost answer gives UNCERTAIN(void); capture stays blocked; GET authorization confirms VOIDED', async () => {
   const pp = new PayPalFixture({ cortar: ['void'] }); const m = await pronto(new StoreMemoria(), pp);
   await m.anular('P1', { humano: true });
   assert.deepEqual([m.pedido('P1').estado, m.pedido('P1').incerto], ['UNCERTAIN', 'void']);
-  await m.capturar('P1', { humano: true });
-  assert.equal(pp.posts.filter((x) => x.op === 'capture').length, 0, 'no capture while the void is uncertain');
-  await m.reconciliar('P1');
+  pp.o.cortar = [];
+  assert.equal(await tentarTudo(m, pp), 0);
   assert.equal(m.pedido('P1').estado, 'VOIDED');
   assert.equal(pp.posts.filter((x) => x.op === 'void').length, 1);
+  assert.equal(pp.posts.filter((x) => x.op === 'capture').length, 0);
 });
 
-test('void: restart in flight gives UNCERTAIN(void); if PayPal never got it, GET says so and only a human resend (same id) sends again', async () => {
+test('void: restart in flight and PayPal never got it: GET shows CREATED, the order stays UNCERTAIN, zero new POST', async () => {
   const store = new StoreMemoria(); const pp = new PayPalFixture();
   const m1 = await pronto(store, pp);
   const orig = pp.anular.bind(pp); pp.anular = () => new Promise(() => {}); // the request never reaches PayPal
   m1.anular('P1', { humano: true }); await espera();
   const m2 = nova(pp, store); pp.anular = orig;
   assert.deepEqual([m2.pedido('P1').estado, m2.pedido('P1').incerto], ['UNCERTAIN', 'void']);
-  await m2.reconciliar('P1');
-  assert.match(m2.pedido('P1').alertas.at(-1).msg, /void not confirmed: PayPal shows CREATED/);
-  assert.equal(pp.posts.length, 0, 'reconciliation sent nothing');
-  await m2.reenviarIdempotente('P1', { humano: true });
-  assert.equal(m2.pedido('P1').estado, 'VOIDED');
-  assert.equal(pp.posts[0].requestId, Object.keys(m2.pedido('P1').requisicoes).find((k) => m2.pedido('P1').requisicoes[k].op === 'void'));
+  assert.equal(await tentarTudo(m2, pp), 0);
+  assert.match(m2.pedido('P1').alertas.at(-1).msg, /void not confirmed: PayPal shows CREATED\. Blocked for manual review; nothing is sent\./);
+  assert.equal(pp.posts.length, 0);
+  assert.equal(m2.pedido('P1').estado, 'UNCERTAIN');
 });
 
-test('reauthorize: lost answer gives UNCERTAIN(reauthorize); a human resend returns the same new authorization', async () => {
+test('reauthorize: lost answer gives UNCERTAIN(reauthorize); no GET settles it; zero new POST', async () => {
   let t = Date.parse('2026-11-09T12:00:00Z');
   const pp = new PayPalFixture({ cortar: ['reauthorize'] }); const m = await pronto(new StoreMemoria(), pp, 'L0.csv', { agora: () => t });
   t += 4 * DIA;
   await m.reautorizar('P1', { humano: true });
   assert.deepEqual([m.pedido('P1').estado, m.pedido('P1').incerto], ['UNCERTAIN', 'reauthorize']);
-  await m.capturar('P1', { humano: true });
-  assert.equal(pp.posts.filter((x) => x.op === 'capture').length, 0);
   pp.o.cortar = [];
-  await m.reenviarIdempotente('P1', { humano: true });
-  const reauts = pp.posts.filter((x) => x.op === 'reauthorize');
-  assert.equal(reauts.length, 2); assert.equal(reauts[0].requestId, reauts[1].requestId);
-  assert.equal(pp.aut.size, 2, 'one original plus one reauthorization, not two');
-  assert.equal(m.pedido('P1').estado, 'CHECKED'); assert.equal(m.pedido('P1').reautorizacoes, 1);
+  assert.equal(await tentarTudo(m, pp), 0);
+  assert.equal(pp.posts.filter((x) => x.op === 'reauthorize').length, 1);
+  assert.equal(pp.posts.filter((x) => x.op === 'capture').length, 0);
+  assert.equal(m.pedido('P1').estado, 'UNCERTAIN');
+  assert.match(m.pedido('P1').alertas.at(-1).msg, /uncertain reauthorize: no GET can settle it/);
 });
 
-test('capture is never resent, not even by a human', async () => {
-  const pp = new PayPalFixture({ cortarResposta: true }); const m = await pronto(new StoreMemoria(), pp);
+test('capture: lost answer without a verifiable link: every action tried, zero new POST', async () => {
+  const pp = new PayPalFixture({ cortarResposta: true, semVinculo: true }); const m = await pronto(new StoreMemoria(), pp);
   await m.capturar('P1', { humano: true });
-  await assert.rejects(m.reenviarIdempotente('P1', { humano: true }), (e) => e.codigo === 'RESEND_NOT_ALLOWED');
+  assert.deepEqual([m.pedido('P1').estado, m.pedido('P1').incerto], ['UNCERTAIN', 'capture']);
+  pp.o.cortar = [];
+  assert.equal(await tentarTudo(m, pp), 0);
   assert.equal(pp.posts.length, 1);
+  assert.equal(m.pedido('P1').estado, 'UNCERTAIN');
 });
 
 test('webhook matching: missing ids never match an order without an authorization id', async () => {
@@ -190,7 +217,7 @@ test('PayPalRest: exact sandbox origin, no base override, no production switch, 
   }
 });
 
-test('file store lock: a second writer in this process fails; a stale lock from a dead pid is taken over', () => {
+test('file store lock: a second writer in this process fails; a lock from a valid, proven-dead pid is taken over', () => {
   const dir = mkdtempSync(join(tmpdir(), 'cg-lock-'));
   try {
     const caminho = join(dir, 'orders.json');
@@ -198,10 +225,30 @@ test('file store lock: a second writer in this process fails; a stale lock from 
     assert.throws(() => new StoreArquivo(caminho), (e) => e.codigo === 'STORE_LOCKED');
     a.soltar();
     const b = new StoreArquivo(caminho); b.soltar();
-    writeFileSync(`${caminho}.lock`, '2147483646'); // no such process
-    const c = new StoreArquivo(caminho);
-    assert.equal(readFileSync(`${caminho}.lock`, 'utf8'), String(process.pid)); c.soltar();
-    assert.equal(existsSync(`${caminho}.lock`), false);
+    const morto = spawnSync(process.execPath, ['-e', '0']).pid; // a real process that has already exited
+    for (const pid of [String(morto), '2147483646']) {
+      writeFileSync(`${caminho}.lock`, pid);
+      const c = new StoreArquivo(caminho);
+      assert.equal(readFileSync(`${caminho}.lock`, 'utf8'), String(process.pid), `dead pid ${pid} taken over`); c.soltar();
+      assert.equal(existsSync(`${caminho}.lock`), false);
+    }
+    assert.deepEqual(readdirSync(dir), [], 'no temp lock files left behind');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('file store lock is fail-closed: empty, invalid or ambiguous pid content keeps STORE_LOCKED and the file is not removed', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cg-lock-'));
+  try {
+    const caminho = join(dir, 'orders.json');
+    for (const conteudo of ['', ' ', 'abc', '0', '-5', '1.5', '12 34', ' 123', '123\n', '0123', '1e3', '2147483648', '99999999999', String(process.pid) + 'x']) {
+      writeFileSync(`${caminho}.lock`, conteudo);
+      assert.throws(() => new StoreArquivo(caminho), (e) => e.codigo === 'STORE_LOCKED' && /without a valid pid/.test(e.message), JSON.stringify(conteudo));
+      assert.equal(readFileSync(`${caminho}.lock`, 'utf8'), conteudo, `lock ${JSON.stringify(conteudo)} left untouched`);
+    }
+    writeFileSync(`${caminho}.lock`, String(process.pid)); // valid and alive
+    assert.throws(() => new StoreArquivo(caminho), (e) => e.codigo === 'STORE_LOCKED' && /by process/.test(e.message));
+    assert.equal(readFileSync(`${caminho}.lock`, 'utf8'), String(process.pid));
+    assert.deepEqual(readdirSync(dir).sort(), ['orders.json.lock'], 'no temp lock files left behind');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -233,8 +280,7 @@ test('real restart across processes: SIGKILL during a capture; the next process 
     const m = nova(pp, store);
     assert.deepEqual([m.pedido('P1').estado, m.pedido('P1').incerto], ['UNCERTAIN', 'capture']);
     assert.match(m.pedido('P1').alertas.at(-1).msg, /Restart while a capture request was in flight/);
-    await m.capturar('P1', { humano: true });
-    await assert.rejects(m.reenviarIdempotente('P1', { humano: true }), (e) => e.codigo === 'RESEND_NOT_ALLOWED');
+    assert.equal(await tentarTudo(m, pp), 0);
     assert.equal(pp.posts.length, 0);
     store.soltar();
   } finally { filho.kill('SIGKILL'); rmSync(dir, { recursive: true, force: true }); }

@@ -27,7 +27,6 @@ function render(p) {
   $('liBox').hidden = !amarelo; $('liTxt').textContent = amarelo ? `I read the ${r.rejeicoes.length} rejected rows and accept the delivery.` : '';
   $('capturar').disabled = !(p?.captura_disponivel) || (amarelo && !$('li').checked);
   $('autorizar').hidden = !(info?.modo === 'sandbox' && p?.estado === 'CREATED');
-  $('reenviar').hidden = !(p?.estado === 'UNCERTAIN' && p.incerto && p.incerto !== 'capture');
   $('estado').textContent = p ? `State: ${p.estado}${p.capture_id ? ` · capture ${p.capture_id}` : ''}` : '';
   $('trilha').textContent = (p?.trilha || []).map((t) => `${t.t}  ${t.estado.padEnd(18)} ${t.evento}${t.motivo ? ` (${t.motivo})` : ''}${t.msg ? ` (${t.msg})` : ''}`).join('\n');
 }
@@ -51,7 +50,6 @@ $('reentrega').onclick = () => agir(() => api(`/api/pedidos/${id}/reentrega`, { 
 $('anular').onclick = () => agir(() => api(`/api/pedidos/${id}/anular`, { method: 'POST', body: { confirmo: true } }));
 $('reconciliar').onclick = () => agir(() => api(`/api/pedidos/${id}/reconciliar`, { method: 'POST', body: {} }));
 $('reautorizar').onclick = () => agir(() => api(`/api/pedidos/${id}/reautorizar`, { method: 'POST', body: { confirmo: true } }));
-$('reenviar').onclick = () => agir(() => api(`/api/pedidos/${id}/reenviar`, { method: 'POST', body: { confirmo: true } }));
 $('autorizar').onclick = () => agir(() => api(`/api/pedidos/${id}/autorizar`, { method: 'POST', body: {} }));
 $('entrar').onclick = async () => {
   try { const r = await api('/api/login', { method: 'POST', body: { token: $('token').value } }); csrf = r.csrf; $('token').value = ''; $('loginBox').hidden = true; if (id) agir(() => api(`/api/pedidos/${id}`)); }

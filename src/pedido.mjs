@@ -1,8 +1,9 @@
 // Order state machine for R1: authorize first, capture the full authorized amount only after a
 // deterministic verdict plus an explicit human click. The model never enables capture.
 // Every external call is journaled (intent, PayPal-Request-Id, payload hash, state) BEFORE it is sent;
-// a lost answer or a restart leaves an operation-specific UNCERTAIN state, resolved by GET or by an
-// explicit human resend of the same idempotent request. A capture is never resent.
+// a lost answer or a restart leaves an operation-specific UNCERTAIN state. It is resolved by GET where a GET can
+// settle it, otherwise it stays blocked with an alert for manual review. No POST is ever sent for an UNCERTAIN
+// operation, not even by a human click: PayPal-Request-Id retention and per-endpoint replay are not qualified yet.
 // PayPal references (read 08/11/2026):
 //  - Orders v2 authorize: https://developer.paypal.com/api/orders/v2/orders-authorize
 //  - Payments v2 capture (final_capture): https://developer.paypal.com/api/payments/v2/authorizations-capture
@@ -35,7 +36,6 @@ export function requestIdDe(...partes) {
 const RANK = { CREATED: 0, AUTHORIZED: 1, DELIVERED: 2, CHECKED: 3, CAPTURE_REQUESTED: 4, CAPTURE_PENDING: 5, CAPTURED: 9, CAPTURE_DECLINED: 9, VOIDED: 9, EXPIRED: 9 };
 const VIVOS = ['AUTHORIZED', 'DELIVERED', 'CHECKED'];
 const EM_VOO = { create: 'CREATE_REQUESTED', authorize: 'AUTHORIZE_REQUESTED', capture: 'CAPTURE_REQUESTED', void: 'VOID_REQUESTED', reauthorize: 'REAUTHORIZE_REQUESTED' };
-const REENVIO_HUMANO = ['create', 'authorize', 'void', 'reauthorize']; // capture: GET only, never resent
 const texto = (v) => typeof v === 'string' && v.length > 0;
 
 export class Mesa {
@@ -299,7 +299,7 @@ export class Mesa {
               const c = await this.paypal.obterCaptura(k);
               if (['COMPLETED', 'PENDING'].includes(c.status) && this.#confere(p, c)) return this.#aplicarCaptura(p, c);
             }
-            if (a.status === 'CREATED' && !k) { this.#alerta(p, 'PayPal shows the authorization still open. A person decides; the system never resends a capture.'); return p; }
+            if (a.status === 'CREATED' && !k) { this.#alerta(p, 'PayPal shows the authorization still open. Blocked for manual review; nothing is sent.'); return p; }
             this.#alerta(p, 'probable capture without a verifiable link; capture, void and reauthorization stay blocked until a person reviews');
             return p;
           }
@@ -308,20 +308,20 @@ export class Mesa {
             const o = await this.paypal.obterPedido(p.order_id);
             const auts = o.purchase_units?.[0]?.payments?.authorizations || [];
             if (auts.length === 1 && texto(auts[0].id)) { delete p.pendente; this.#aplicarAutorizacao(p, auts[0]); return p; }
-            this.#alerta(p, `order ${p.order_id} shows ${auts.length} authorizations; a person decides (resending the same idempotent authorize is allowed)`);
+            this.#alerta(p, `order ${p.order_id} shows ${auts.length} authorizations; blocked for manual review, nothing is sent`);
             return p;
           }
           case 'void': {
             const a = await this.paypal.obterAutorizacao(p.autorizacao_id);
             if (a.status === 'VOIDED') { delete p.pendente; p.estado = 'VOIDED'; delete p.incerto; this.#registrar(p, 'voided (confirmed by GET)'); return p; }
-            this.#alerta(p, `void not confirmed: PayPal shows ${a.status}. A person may resend the same idempotent void; nothing is sent automatically.`);
+            this.#alerta(p, `void not confirmed: PayPal shows ${a.status}. Blocked for manual review; nothing is sent.`);
             return p;
           }
           case 'divergence':
           default:
             break;
         }
-        this.#alerta(p, `uncertain ${p.incerto}: no GET can settle it; a person reviews (create and reauthorize may be resent with the same idempotent request)`);
+        this.#alerta(p, `uncertain ${p.incerto}: no GET can settle it; blocked for manual review, nothing is sent`);
         return p;
       }
       if (VIVOS.includes(p.estado) && texto(p.autorizacao_id)) {
@@ -332,41 +332,6 @@ export class Mesa {
           this.#alerta(p, `divergence: local ${p.divergencia.local}, PayPal ${a.status}; no action until a person reviews`);
         }
       }
-      return p;
-    });
-  }
-
-  /**
-   * Explicit human resend of the SAME journaled request (same PayPal-Request-Id, same payload) after a lost answer.
-   * PayPal returns the latest state of the earlier request for a repeated id. Capture is excluded.
-   */
-  async reenviarIdempotente(id, { humano = false } = {}) {
-    if (!humano) throw new ErroRegra('NO_HUMAN_CLICK', 'a resend needs a human click');
-    return this.#trava(id, async () => {
-      const p = this.pedido(id);
-      if (p.estado !== 'UNCERTAIN' || !REENVIO_HUMANO.includes(p.incerto) || !p.pendente) throw new ErroRegra('RESEND_NOT_ALLOWED', `${p.estado}/${p.incerto || '-'}`);
-      const { op, requestId, estado_anterior } = p.pendente;
-      const req = p.requisicoes[requestId];
-      if (!req) throw new ErroRegra('RESEND_NOT_ALLOWED', 'no journaled request');
-      this.#registrar(p, `${op} resent with the same request id`, { requestId: requestId.slice(0, 8) });
-      p.estado = EM_VOO[op]; this.#salvar();
-      let r;
-      try {
-        r = await ({
-          create: () => this.paypal.criarPedido({ ...{ valor: req.payload.valor, moeda: req.payload.moeda }, requestId }),
-          authorize: () => this.paypal.autorizarPedido({ orderId: req.payload.order_id, requestId }),
-          void: () => this.paypal.anular({ autorizacaoId: p.autorizacao_id, requestId }),
-          reauthorize: () => this.paypal.reautorizar({ autorizacaoId: p.autorizacao_id, payload: req.payload, requestId }),
-        })[op]();
-      } catch (e) {
-        if (e.incerto) { p.estado = 'UNCERTAIN'; this.#registrar(p, `no answer again for ${op}`); return p; }
-        delete p.pendente; p.estado = estado_anterior; delete p.incerto; this.#registrar(p, `${op} refused by PayPal`, { motivo: e.message }); return p;
-      }
-      delete p.pendente; delete p.incerto;
-      if (op === 'create') { p.order_id = r.id; p.aprovacao_url = r.aprovacao_url; p.estado = 'CREATED'; this.#registrar(p, 'PayPal order created'); }
-      if (op === 'authorize') this.#aplicarAutorizacao(p, r);
-      if (op === 'void') { p.estado = 'VOIDED'; this.#registrar(p, 'voided'); }
-      if (op === 'reauthorize') this.#aplicarReautorizacao(p, r);
       return p;
     });
   }

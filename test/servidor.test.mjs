@@ -130,3 +130,21 @@ test('sandbox: no public orders; operator login rotates the session; webhook rou
   for (let i = 0; i < 3; i++) await outro.req('POST', '/api/login', { corpo: { token: 'nope' } });
   assert.deepEqual((await outro.req('POST', '/api/login', { corpo: { token: TOKEN } })).j.codigo, 'LOGIN_LOCKED', 'lockout after repeated failures');
 });
+
+test('C2a: the resend action no longer exists over HTTP (fixture and sandbox), and no POST reaches PayPal', async () => {
+  const f = await subir({ modo: 'fixture' });
+  const a = visitante(f); await a.entrar();
+  const id = (await a.req('POST', '/api/pedidos')).j.id;
+  const r = await a.req('POST', `/api/pedidos/${id}/reenviar`, { corpo: { confirmo: true } });
+  assert.deepEqual([r.st, r.j.erro], [404, 'unknown action']);
+  const pp = new PayPalFixture({ cortar: ['create'] });
+  const s = await subir({ modo: 'sandbox', paypal: pp, store: new StoreMemoria(), operadorSha256: HASH });
+  const v = visitante(s); await v.entrar();
+  v.csrf = (await v.req('POST', '/api/login', { corpo: { token: TOKEN } })).j.csrf;
+  const p = (await v.req('POST', '/api/pedidos')).j;
+  assert.deepEqual([p.estado, p.incerto], ['UNCERTAIN', 'create']);
+  const antes = pp.chamadas.length;
+  for (const acao of ['reenviar', 'autorizar', 'capturar', 'anular', 'reautorizar', 'reconciliar']) await v.req('POST', `/api/pedidos/${p.id}/${acao}`, { corpo: { confirmo: true, li_rejeicoes: true } });
+  assert.equal(pp.chamadas.length - antes, 0);
+  assert.equal((await v.req('GET', `/api/pedidos/${p.id}`)).j.estado, 'UNCERTAIN');
+});
