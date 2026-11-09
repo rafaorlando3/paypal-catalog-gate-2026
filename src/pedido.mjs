@@ -145,12 +145,42 @@ export class Mesa {
     this.#salvar(); // intent is durable before the request leaves
     let r;
     try { r = await enviar(requestId); } catch (e) {
-      if (e.incerto) { p.estado = 'UNCERTAIN'; p.incerto = op; this.#registrar(p, `no answer from PayPal for ${op}`, { motivo: e.message }); return p; }
+      // Fail-closed: only an error raised before sending, or a complete 4xx answer, is a definitive refusal.
+      const definitivo = e.naoEnviado === true || (!e.incerto && Number.isInteger(e.status) && e.status >= 400 && e.status < 500);
+      if (!definitivo) { p.estado = 'UNCERTAIN'; p.incerto = op; this.#registrar(p, `no complete answer from PayPal for ${op}`, { motivo: e.message }); return p; }
       const anterior = p.pendente.estado_anterior; delete p.pendente;
       onRecusa(e, anterior); return p;
     }
+    const falta = this.#evidencia(p, op, r);
+    if (falta) {
+      p.estado = 'UNCERTAIN'; p.incerto = op;
+      this.#alerta(p, `PayPal answered ${op} without enough evidence (${falta}); reconcile by GET where possible, otherwise manual review; nothing is sent`);
+      return p;
+    }
+    onOk(r);
     delete p.pendente;
-    onOk(r); return p;
+    return p;
+  }
+
+  /** What a 2xx answer must carry before it counts as success. Returns the missing evidence, or null. */
+  #evidencia(p, op, r) {
+    if (r === null || typeof r !== 'object' || Array.isArray(r)) return 'no answer object';
+    switch (op) {
+      case 'create': return texto(r.id) && texto(r.status) ? null : 'order without id or status';
+      case 'authorize':
+      case 'reauthorize': return texto(r.id) && texto(r.status) ? null : 'authorization without id or status';
+      case 'capture': {
+        if (!texto(r.id) || !['COMPLETED', 'PENDING', 'DECLINED', 'FAILED'].includes(r.status)) return 'capture without id or a known status';
+        if (r.amount && (r.amount.value !== p.valor || r.amount.currency_code !== p.moeda)) return 'capture amount differs from the order';
+        const aut = r.supplementary_data?.related_ids?.authorization_id;
+        if (aut !== undefined && aut !== p.autorizacao_id) return 'capture linked to another authorization';
+        return null;
+      }
+      case 'void':
+        if (r.vazio === true) return r.http === 204 ? null : `empty answer with HTTP ${r.http}`; // 204 No Content is the documented void answer
+        return r.status === 'VOIDED' ? null : 'void answer without status VOIDED';
+      default: return 'unknown operation';
+    }
   }
 
   async criar({ id, valor = '50.00', moeda = 'USD', dono = null }) {

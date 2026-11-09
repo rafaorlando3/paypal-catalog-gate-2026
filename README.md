@@ -8,7 +8,7 @@ Authorize/capture is not escrow and not a licensed custody service. Everything h
 
 ```bash
 node --version   # 22+
-npm test         # 53 tests: the 19 scenarios (V1-V6, F1-F8, H1-H2, I1-I2, C19) plus restart, isolation and HTTP tests; no PayPal call
+npm test         # 70 tests: the 19 scenarios (V1-V6, F1-F8, H1-H2, I1-I2, C19) plus restart, isolation and HTTP tests; no PayPal call
 npm start        # http://localhost:8787 , fixture mode (public)
 npm run demo:ai  # defective lots: rules verdict, fixed template explanation, model explanation (only with GEMINI_API_KEY), checker
 ```
@@ -23,7 +23,7 @@ export DATA_DIR=/var/lib/catalog-gate-sandbox           # not shared with any ot
 npm run start:sandbox
 ```
 
-The REST client talks only to `https://api-m.sandbox.paypal.com`: there is no production switch and no base override, and redirects are refused so credentials never leave that origin.
+The REST client talks only to `https://api-m.sandbox.paypal.com`: there is no production switch and no base override, and redirects are refused so credentials never leave that origin. Headers and the full body are read under one timeout: an answer that is not complete and well formed (body lost or hung, non-JSON, a 2xx without the id or status the operation needs, 5xx, 408, 409) leaves the operation UNCERTAIN, never a refusal and never a success. Only a complete 4xx is a definitive refusal. A void may answer 204 with no body.
 
 Run fixture and sandbox as two separate processes. The fixture is public: one simulator per order, each order bound to the visitor's session (another visitor gets "not found"), a cap on orders per session. The sandbox is protected: every order route needs the operator login, and the login gets a new session id. In both modes every POST needs the session cookie (HttpOnly, SameSite=Strict), the per-session CSRF token in `X-CG-CSRF` and a same-origin `Origin` header. The signed PayPal webhook is the only POST without a session.
 

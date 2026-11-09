@@ -210,8 +210,12 @@ test('PayPalRest: exact sandbox origin, no base override, no production switch, 
     assert.deepEqual(vistos.map((v) => v.auth), ['Basic', 'Bearer', 'Bearer', 'Bearer']);
     await assert.rejects(c.obterAutorizacao('../../v1/x'), /invalid PayPal resource id/);
     await assert.rejects(c.obterCaptura('https://evil.example/'), /invalid PayPal resource id/);
+    // A redirect on the token call: the resource request is never sent (naoEnviado), never followed.
     const redir = new PayPalRest({ clientId: 'x', secret: 'y', fetchImpl: async () => { throw new TypeError('fetch failed: redirect mode is set to error'); } });
-    await assert.rejects(redir.obterAutorizacao('A1'), (e) => e.incerto === true);
+    await assert.rejects(redir.obterAutorizacao('A1'), (e) => e.naoEnviado === true && !e.incerto);
+    // A redirect on the resource request itself: it may have been processed, so it is uncertain.
+    const redir2 = new PayPalRest({ clientId: 'x', secret: 'y', fetchImpl: async (url) => { if (url.endsWith('/v1/oauth2/token')) return { status: 200, text: async () => '{"access_token":"T","expires_in":3600}' }; throw new TypeError('fetch failed: redirect mode is set to error'); } });
+    await assert.rejects(redir2.anular({ autorizacaoId: 'A1', requestId: 'r' }), (e) => e.incerto === true);
   } finally {
     for (const [k, v] of Object.entries(env)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
   }
