@@ -9,7 +9,7 @@ import { randomBytes, randomUUID, createHash, timingSafeEqual } from 'node:crypt
 import { Mesa, ErroRegra } from './pedido.mjs';
 import { PayPalFixture } from './paypal-fixture.mjs';
 import { B0 } from './brief.mjs';
-import { adaptadorDoAmbiente, erroIA } from './c3/adaptador.mjs';
+import { adaptadorDoAmbiente, erroIA, erroPublicoIA } from './c3/adaptador.mjs';
 
 const RAIZ = new URL('..', import.meta.url);
 const LOTES = Object.fromEntries(readdirSync(new URL('fixtures/L0/', RAIZ)).filter((n) => n.startsWith('L0')).map((n) => [n, readFileSync(new URL(`fixtures/L0/${n}`, RAIZ), 'utf8')]));
@@ -81,7 +81,12 @@ export function criarApp(c) {
       if (!c.gerar) throw new Error('advisory model not configured');
       if (llm.chamadas >= L.llmPorDia || s.llm >= L.llmPorSessao) throw new Error('advisory budget reached');
       llm.chamadas++; s.llm++; // counted before the call
-      return c.gerar(prompt);
+      // C3a-U1: Mesa.parecer stores and logs the message of whatever the generator throws. Only fixed public texts
+      // may reach the store, the trail or the HTTP view, so a provider failure (body, URL, key, stack) is replaced here,
+      // before it reaches the order. A real provider stays unconnected in this increment.
+      try { return await c.gerar(prompt); } catch (e) {
+        throw erroIA(e && e.name === 'AbortError' ? 'provider_timeout' : erroPublicoIA(e).codigo);
+      }
     };
   }
 

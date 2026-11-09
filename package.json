@@ -16,6 +16,7 @@
     "demo:ai": "node src/demo-ia.mjs",
     "eval:c3": "node src/c3/avaliar.mjs",
     "fixtures:c3": "node src/c3/gerar_c3.mjs fixtures/C3",
-    "test:e2e:c3a": "node test/e2e/c3a-pedido-vinculo.e2e.cjs"
+    "test:e2e:c3a": "node test/e2e/c3a-pedido-vinculo.e2e.cjs",
+    "test:e2e:c3au1": "node test/e2e/c3au1-respostas-atrasadas.e2e.cjs"
   }
 }
