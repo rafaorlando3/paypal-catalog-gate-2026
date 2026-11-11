@@ -2,10 +2,10 @@
 
 ## Status & Authorization Notice
 
-- **State:** `PREPARATION_ONLY_NOT_AUTHORIZED_TO_PUBLISH_PUSH_OR_RUN`
-- **Product Candidate Commit:** `5927d52724644d6f8f6e8e5e63f35ad0cffd8943`
-- **Product Tree:** `dd0078b4dd74929b387db5ea1fce804d2e32b534` (55 tracked blobs, 357,295 bytes)
-- **Scope:** Local source preparation for offline unit + real Chromium E2E qualification in `MODE=fixture`. No real PayPal Sandbox REST call, no AI provider call (`GEMINI_API_KEY` absent), no live money, and no artifact/cache upload.
+- **State:** `HUMAN_AUTHORIZED_CI0_PUBLIC_STANDARD_LINUX_20261111`
+- **Product Candidate Commit:** `483670c64ae55c08ac823217fc8dbdb8442bbb0f`
+- **Product Tree:** `2824b71b2034785e3d95b111cb706380d90eabc2` (55 tracked blobs, 358,066 bytes)
+- **Scope:** Authorized offline CI qualification for offline unit + real Chromium E2E qualification in `MODE=fixture`. No real PayPal Sandbox REST call, no AI provider call (`GEMINI_API_KEY` absent), no live money, and no artifact/cache upload.
 
 ## Architecture & Separation from Product
 
@@ -14,7 +14,7 @@ The 55 product blobs are never modified. Only the following 5 CI overlay paths e
 1. `.github/workflows/qualify-paypal-offline.yml` — Manual `workflow_dispatch` job on `ubuntu-24.04` (15-minute job cap, `contents: read`, `persist-credentials: false`).
 2. `.ci/pins.json` — Immutable manifest of all 55 product blobs (mode `100644`, Git blob SHA-1, SHA-256, byte size), pinned Playwright container digest (`linux/amd64`), and SRI `sha512` hashes for `playwright@1.64.1` and `playwright-core@1.64.1`.
 3. `.ci/qualify.py` — Linux-only host harness enforcing stage budgets (`45s + 120s + 15s + 90s + 90s + 90s + 30s = 480s` plus `120s` closure reserve = `600s` total):
-   - Materializes the 55 blobs directly from Git objects (`git ls-tree` / `git cat-file blob`) into an isolated `product/` directory and verifies SHA-1, SHA-256, and total byte count (`357295`) before and after container execution.
+   - Materializes the 55 blobs directly from Git objects (`git ls-tree` / `git cat-file blob`) into an isolated `product/` directory and verifies SHA-1, SHA-256, and total byte count (`358066`) before and after container execution.
    - Downloads only the 2 pinned NPM tarballs (`playwright` and `playwright-core`), verifies `sha512` SRI before reading the tar stream, and extracts with strict member/size/path guards into `vendor/node_modules/`.
    - Creates a single container `cg-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}` with `--network none`, `--read-only`, `--cap-drop ALL`, `--security-opt no-new-privileges`, and `:ro` bind mounts for `/product`, `/ci`, and `/vendor`.
    - Captures `docker inspect` before start and after `docker wait`, removes the owned container before post-audit, and prints the SHA-256-framed JSON qualification report to stdout.

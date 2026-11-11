@@ -1,10 +1,10 @@
 {
   "schema": "catalog-gate-ci-offline-v1",
   "product": {
-    "commit": "5927d52724644d6f8f6e8e5e63f35ad0cffd8943",
-    "tree": "dd0078b4dd74929b387db5ea1fce804d2e32b534",
+    "commit": "483670c64ae55c08ac823217fc8dbdb8442bbb0f",
+    "tree": "2824b71b2034785e3d95b111cb706380d90eabc2",
     "blobs": 55,
-    "total_bytes": 357295,
+    "total_bytes": 358066,
     "files": [
       {
         "path": ".gitignore",
@@ -352,9 +352,9 @@
       {
         "path": "test/e2e/c3a-pedido-vinculo.e2e.cjs",
         "mode": "100644",
-        "blob": "d82ed64aaf3c948c20c4db66f2719d7282e2af3f",
-        "bytes": 3428,
-        "sha256": "235c22cc61fcf9e0c27e28adea4320e60d986213d6ad1c574133876477dbdbba"
+        "blob": "d257c7ca3cc4d230a46ecda489b09006422f5329",
+        "bytes": 4199,
+        "sha256": "deac4ed5446c12dd40a0d9e2bde4bd0367fb674d4ac5b96198d84d5513830917"
       },
       {
         "path": "test/e2e/c3au1-respostas-atrasadas.e2e.cjs",
@@ -449,9 +449,9 @@
     "source_network_guarantee": "kernel networknone; no claimed perrequest count without actualobserverimplementation"
   },
   "authorization": {
-    "state": "PREPARATION_ONLY_NOT_AUTHORIZED_TO_PUBLISH_PUSH_OR_RUN",
+    "state": "HUMAN_AUTHORIZED_CI0_PUBLIC_STANDARD_LINUX_20261111",
     "planned_public_repository": "rafaorlando3/paypal-catalog-gate-2026",
-    "existing_repo_not_touched": true,
+    "existing_repo_not_touched": false,
     "allowed_cost_USD": 0,
     "secrets": "NONE",
     "Sandbox_or_AI_calls": false

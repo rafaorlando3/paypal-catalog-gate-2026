@@ -15,7 +15,24 @@ const conferir = (cond, msg) => { if (!cond) falhas.push(msg); };
     await pg.selectOption('#idioma', idioma); await pg.click('#montarPedido');
     await pg.waitForFunction(() => document.getElementById('pedidoTxt').textContent.length > 0);
   };
-  const novoPedido = async () => { await pg.click('#novo'); await pg.waitForFunction(() => document.getElementById('ordem').textContent.includes('Order')); };
+  const novoPedido = async () => {
+    const idAntes = await pg.evaluate(() => decodeURIComponent(location.hash.slice(1)));
+    const [resp] = await Promise.all([
+      pg.waitForResponse((r) => r.request().method() === 'POST' && new URL(r.url()).pathname === '/api/pedidos'),
+      pg.click('#novo'),
+    ]);
+    if (!resp.ok()) throw new Error(`POST /api/pedidos failed with status ${resp.status()}`);
+    const p = await resp.json();
+    if (!p || typeof p.id !== 'string' || !p.id || typeof p.order_id !== 'string' || !p.order_id) {
+      throw new Error('Invalid POST /api/pedidos response payload');
+    }
+    if (p.id === idAntes) throw new Error(`New order id did not change from ${idAntes}`);
+    await pg.waitForFunction(
+      ({ id, oid }) => decodeURIComponent(location.hash.slice(1)) === id && document.getElementById('ordem').textContent.includes(oid),
+      { id: p.id, oid: p.order_id }
+    );
+    return p;
+  };
   const entregar = async (lote) => {
     const antes = await pg.textContent('#relatorio');
     await pg.selectOption('#lote', lote); await pg.click('#entregar');
