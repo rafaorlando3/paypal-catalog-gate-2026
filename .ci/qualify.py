@@ -272,6 +272,23 @@ def emit_framed_report(report: dict) -> None:
     sys.stdout.flush()
 
 
+def read_regular_file_bounded(fpath: Path, expected_size: int, max_bytes: int) -> bytes:
+    if expected_size < 0 or expected_size > max_bytes:
+        raise RuntimeError(f"File size {expected_size} out of bounds (max {max_bytes}) for {fpath.name}")
+    buf = bytearray()
+    with fpath.open("rb") as f:
+        while True:
+            chunk = f.read(65536)
+            if not chunk:
+                break
+            if len(buf) + len(chunk) > max_bytes:
+                raise RuntimeError(f"File grew beyond max_bytes ({max_bytes}) while reading {fpath.name}")
+            buf.extend(chunk)
+    if len(buf) != expected_size:
+        raise RuntimeError(f"File size changed during read ({len(buf)} != {expected_size}) for {fpath.name}")
+    return bytes(buf)
+
+
 def emit_evidence_files(evidence_dir: Path, max_file_bytes: int, max_total_bytes: int, require_all: bool) -> dict:
     emitted = []
     errors = []
@@ -301,19 +318,20 @@ def emit_evidence_files(evidence_dir: Path, max_file_bytes: int, max_total_bytes
             if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
                 errors.append(f"Non-regular evidence file: {fname}")
                 continue
+            st_size = int(st.st_size)
+            if st_size < 0 or st_size > max_file_bytes:
+                errors.append(f"Evidence file {fname} st_size exceeds max_file_bytes ({st_size} > {max_file_bytes})")
+                continue
+            if total_bytes + st_size > max_total_bytes:
+                errors.append(f"Evidence total st_size exceeds max_total_bytes ({total_bytes + st_size} > {max_total_bytes})")
+                continue
             try:
-                raw = fpath.read_bytes()
+                raw = read_regular_file_bounded(fpath, st_size, max_file_bytes)
             except Exception as exc:
                 errors.append(f"Read error on {fname}: {exc}")
                 continue
 
             size = len(raw)
-            if size > max_file_bytes:
-                errors.append(f"Evidence file {fname} exceeds max_file_bytes ({size} > {max_file_bytes})")
-                continue
-            if total_bytes + size > max_total_bytes:
-                errors.append(f"Evidence total exceeds max_total_bytes ({total_bytes + size} > {max_total_bytes})")
-                continue
 
             total_bytes += size
             f_sha256 = sha256_bytes(raw)
@@ -335,6 +353,189 @@ def emit_evidence_files(evidence_dir: Path, max_file_bytes: int, max_total_bytes
         errors.append(f"Unhandled evidence emission error: {exc}")
 
     return {"ok": len(errors) == 0, "total_bytes": total_bytes, "emitted": emitted, "errors": errors}
+
+
+def reconcile_and_close_container(
+    container_name: str,
+    pinned_image_id: str,
+    create_intent: bool,
+    create_outcome: str,
+    created_id_from_cli: str,
+    preexisting_before_intent: bool,
+    wait_rc_str: str,
+    timed_out_waiting: bool,
+) -> dict:
+    rec = {
+        "create_intent": create_intent,
+        "create_outcome": create_outcome,
+        "created_id_from_cli": created_id_from_cli,
+        "preexisting_before_intent": preexisting_before_intent,
+        "timed_out_waiting": timed_out_waiting,
+        "wait_output": wait_rc_str,
+        "reconciled_id": None,
+        "ownership_verified": False,
+        "kill_attempted": False,
+        "kill_rc": None,
+        "wait_after_kill_rc": None,
+        "terminal_inspect": None,
+        "rm_attempted": False,
+        "rm_rc": None,
+        "post_rm_name_scan": None,
+        "closure_status": "UNKNOWN",
+        "closure_confirmed": False,
+        "errors": [],
+    }
+
+    if preexisting_before_intent:
+        rec["errors"].append("Preexisting container with job name detected before create intent; refusing kill/rm")
+        return rec
+
+    if not create_intent:
+        rec["closure_status"] = "NOT_CREATED_NO_INTENT"
+        rec["closure_confirmed"] = True
+        return rec
+
+    try:
+        ps_res = run_cmd(
+            ["docker", "ps", "-aq", "--no-trunc", "--filter", f"name=^/{container_name}$"],
+            timeout=10,
+            check=False,
+        )
+        if ps_res.returncode != 0:
+            rec["errors"].append(f"docker ps by name failed (rc={ps_res.returncode}): {ps_res.stderr.strip()[:200]}")
+            return rec
+        found_ids = [line.strip() for line in ps_res.stdout.splitlines() if line.strip()]
+    except Exception as exc:
+        rec["errors"].append(f"docker ps exception: {exc}")
+        return rec
+
+    if len(found_ids) > 1:
+        rec["errors"].append(f"Multiple containers matched name {container_name}: {found_ids}")
+        return rec
+
+    if len(found_ids) == 0:
+        if create_outcome == "FAILED_DEFINITE":
+            rec["closure_status"] = "CREATE_FAILED_NO_CONTAINER"
+            rec["closure_confirmed"] = True
+        else:
+            rec["errors"].append(
+                f"create_outcome={create_outcome} but no container found by name; cannot prove absence of in-flight daemon creation"
+            )
+        return rec
+
+    cid = found_ids[0]
+    rec["reconciled_id"] = cid
+    if created_id_from_cli and cid != created_id_from_cli:
+        rec["errors"].append(f"Reconciled ID {cid} != CLI returned ID {created_id_from_cli}")
+        return rec
+
+    try:
+        insp_res = run_cmd(["docker", "inspect", cid], timeout=10, check=False)
+        if insp_res.returncode != 0:
+            rec["errors"].append(f"docker inspect {cid} failed (rc={insp_res.returncode}): {insp_res.stderr.strip()[:200]}")
+            return rec
+        insp = json.loads(insp_res.stdout)[0]
+    except Exception as exc:
+        rec["errors"].append(f"docker inspect parse error: {exc}")
+        return rec
+
+    obs_id = insp.get("Id")
+    obs_name = insp.get("Name")
+    obs_image = insp.get("Image")
+    obs_labels = (insp.get("Config") or {}).get("Labels") or {}
+    obs_label_val = obs_labels.get("cg.run")
+
+    if obs_id != cid:
+        rec["errors"].append(f"Inspect Id {obs_id} != {cid}")
+    if obs_name != f"/{container_name}":
+        rec["errors"].append(f"Inspect Name {obs_name!r} != '/{container_name}'")
+    if obs_label_val != container_name:
+        rec["errors"].append(f"Inspect label cg.run {obs_label_val!r} != {container_name!r}")
+    if not pinned_image_id or obs_image != pinned_image_id:
+        rec["errors"].append(f"Inspect Image {obs_image!r} != pinned {pinned_image_id!r}")
+
+    if rec["errors"]:
+        return rec
+
+    rec["ownership_verified"] = True
+    state_obj = insp.get("State") or {}
+
+    if state_obj.get("Running") is True or state_obj.get("Status") in ("running", "paused", "restarting"):
+        rec["kill_attempted"] = True
+        try:
+            k_res = run_cmd(["docker", "kill", cid], timeout=15, check=False)
+            rec["kill_rc"] = k_res.returncode
+            w_res = run_cmd(["docker", "wait", cid], timeout=15, check=False)
+            rec["wait_after_kill_rc"] = w_res.returncode
+        except Exception as exc:
+            rec["errors"].append(f"kill/wait exception on {cid}: {exc}")
+            return rec
+
+        try:
+            insp2_res = run_cmd(["docker", "inspect", cid], timeout=10, check=False)
+            if insp2_res.returncode != 0:
+                rec["errors"].append(f"post-kill inspect failed (rc={insp2_res.returncode})")
+                return rec
+            insp = json.loads(insp2_res.stdout)[0]
+            state_obj = insp.get("State") or {}
+        except Exception as exc:
+            rec["errors"].append(f"post-kill inspect exception: {exc}")
+            return rec
+
+    terminal_status = state_obj.get("Status")
+    terminal_running = state_obj.get("Running")
+    terminal_pid = state_obj.get("Pid")
+    rec["terminal_inspect"] = {
+        "status": terminal_status,
+        "running": terminal_running,
+        "pid": terminal_pid,
+        "oom_killed": state_obj.get("OOMKilled"),
+        "dead": state_obj.get("Dead"),
+        "exit_code": state_obj.get("ExitCode"),
+        "error": state_obj.get("Error"),
+        "started_at": state_obj.get("StartedAt"),
+        "finished_at": state_obj.get("FinishedAt"),
+        "observed_closed_at_utc": utc_now(),
+    }
+
+    if terminal_running is not False or terminal_pid not in (0, None) or terminal_status not in ("created", "exited", "dead"):
+        rec["errors"].append(
+            f"Container not in terminal state before rm: status={terminal_status}, running={terminal_running}, pid={terminal_pid}"
+        )
+        return rec
+
+    rec["rm_attempted"] = True
+    try:
+        rm_res = run_cmd(["docker", "rm", "--volumes", cid], timeout=20, check=False)
+        rec["rm_rc"] = rm_res.returncode
+        if rm_res.returncode != 0:
+            rec["errors"].append(f"docker rm {cid} failed (rc={rm_res.returncode}): {rm_res.stderr.strip()[:200]}")
+            return rec
+    except Exception as exc:
+        rec["errors"].append(f"docker rm exception: {exc}")
+        return rec
+
+    try:
+        scan_res = run_cmd(
+            ["docker", "ps", "-aq", "--no-trunc", "--filter", f"name=^/{container_name}$"],
+            timeout=10,
+            check=False,
+        )
+        if scan_res.returncode != 0:
+            rec["errors"].append(f"post-rm docker ps scan failed (rc={scan_res.returncode})")
+            return rec
+        rem = scan_res.stdout.strip()
+        rec["post_rm_name_scan"] = rem
+        if rem != "":
+            rec["errors"].append(f"Container still visible by name after rm: {rem}")
+            return rec
+    except Exception as exc:
+        rec["errors"].append(f"post-rm scan exception: {exc}")
+        return rec
+
+    rec["closure_status"] = "CLOSED_AND_REMOVED"
+    rec["closure_confirmed"] = True
+    return rec
 
 
 def main() -> int:
@@ -386,7 +587,15 @@ def main() -> int:
     max_total_bytes = int(pins["evidence"]["max_total_bytes"])
 
     workspace_dir = None
-    container_created = False
+    product_dir = None
+    evidence_dir = None
+    img_id = None
+    preexisting_before_intent = False
+    create_intent = False
+    create_outcome = "NOT_ATTEMPTED"
+    created_id_from_cli = None
+    wait_rc_str = None
+    timed_out_waiting = False
 
     try:
         # Stage 1: Preflight & exact 55-blob materialization (45s)
@@ -591,6 +800,7 @@ def main() -> int:
             timeout=10,
         ).stdout.strip()
         if existing:
+            preexisting_before_intent = True
             raise RuntimeError(f"Container {container_name} already exists before create")
 
         rt = pins["runtime"]
@@ -634,8 +844,34 @@ def main() -> int:
             *inside_allowlist_env,
             "node", "/ci/inside.mjs",
         ]
-        container_id = run_cmd(create_args, timeout=20).stdout.strip()
-        container_created = True
+        create_intent = True
+        create_outcome = "UNCERTAIN"
+        try:
+            create_res = subprocess.run(
+                create_args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            create_outcome = "UNCERTAIN"
+            raise RuntimeError(f"docker create timed out (outcome uncertain): {exc}") from exc
+        except Exception as exc:
+            create_outcome = "UNCERTAIN"
+            raise RuntimeError(f"docker create execution error (outcome uncertain): {exc}") from exc
+
+        if create_res.returncode != 0:
+            create_outcome = "FAILED_DEFINITE"
+            raise RuntimeError(f"docker create failed (rc={create_res.returncode}): {create_res.stderr.strip()[:400]}")
+
+        container_id = create_res.stdout.strip()
+        if not re.fullmatch(r"[0-9a-f]{64}", container_id):
+            create_outcome = "UNCERTAIN"
+            raise RuntimeError(f"docker create returned non-64-hex ID: {container_id!r}")
+        created_id_from_cli = container_id
+        create_outcome = "CREATED"
 
         pre_inspect = json.loads(run_cmd(["docker", "inspect", container_name], timeout=10).stdout)[0]
         hc = pre_inspect.get("HostConfig") or {}
@@ -700,7 +936,7 @@ def main() -> int:
         else:
             tmpfs_opts = [tok.strip() for tok in str(tmpfs_map["/tmp"]).split(",") if tok.strip()]
             allowed_size_tokens = {f"size={exp_tmpfs_bytes}", "size=1048576k", "size=1024m", "size=1g"}
-            allowed_mode_tokens = {"mode=1777", f"mode={0o1777}"}
+            allowed_mode_tokens = {"mode=1777"}
             has_rw = "rw" in tmpfs_opts
             has_nosuid = "nosuid" in tmpfs_opts
             size_matches = [t for t in tmpfs_opts if t in allowed_size_tokens]
@@ -781,7 +1017,6 @@ def main() -> int:
 
         run_cmd(["docker", "start", container_name], timeout=15)
         wait_timeout = max(5.0, exec_wait_deadline - time.monotonic())
-        timed_out_waiting = False
         try:
             wait_res = run_cmd(["docker", "wait", container_name], timeout=wait_timeout, check=False)
             wait_rc_str = wait_res.stdout.strip()
@@ -791,42 +1026,40 @@ def main() -> int:
             run_cmd(["docker", "kill", container_name], timeout=15, check=False)
             run_cmd(["docker", "wait", container_name], timeout=15, check=False)
 
-        post_inspect = json.loads(run_cmd(["docker", "inspect", container_name], timeout=10).stdout)[0]
-        state_obj = post_inspect.get("State", {})
-        terminal_closure_utc = utc_now()
-
-        # Remove owned container before audit
-        run_cmd(["docker", "rm", "-f", container_name], timeout=20, check=False)
-        container_created = False
-        remaining_containers = run_cmd(
-            ["docker", "ps", "-aq", "--filter", f"name=^/{container_name}$", "--filter", f"label=cg.run={container_name}"],
-            timeout=10,
-        ).stdout.strip()
-
+        closure_rec = reconcile_and_close_container(
+            container_name=container_name,
+            pinned_image_id=img_id,
+            create_intent=create_intent,
+            create_outcome=create_outcome,
+            created_id_from_cli=created_id_from_cli,
+            preexisting_before_intent=preexisting_before_intent,
+            wait_rc_str=wait_rc_str,
+            timed_out_waiting=timed_out_waiting,
+        )
+        report["cleanup"]["container_closure"] = closure_rec
+        t_insp = closure_rec.get("terminal_inspect") or {}
         report["stages"]["container_terminal_state"] = {
             "timed_out_waiting": timed_out_waiting,
             "wait_output": wait_rc_str,
-            "status": state_obj.get("Status"),
-            "running": state_obj.get("Running"),
-            "oom_killed": state_obj.get("OOMKilled"),
-            "dead": state_obj.get("Dead"),
-            "exit_code": state_obj.get("ExitCode"),
-            "error": state_obj.get("Error"),
-            "started_at": state_obj.get("StartedAt"),
-            "finished_at": state_obj.get("FinishedAt"),
-            "observed_closed_at_utc": terminal_closure_utc,
+            **t_insp,
         }
-        report["cleanup"]["container_removed_before_audit"] = (remaining_containers == "")
+        report["cleanup"]["container_removed_before_audit"] = bool(closure_rec.get("closure_confirmed"))
+        if not closure_rec.get("closure_confirmed"):
+            raise RuntimeError(f"Container closure not confirmed before audit: {closure_rec.get('errors')}")
 
         # Stage 7: Post-execution audit of 55 product blobs & evidence collection (30s)
         s7_start = time.monotonic()
         post_audit = verify_directory_against_pins(product_dir, exp_files, exp_total_bytes)
         inside_summary_path = evidence_dir / "inside-summary.json"
         inside_summary = None
-        if inside_summary_path.is_file():
-            raw_inside = inside_summary_path.read_bytes()
-            if len(raw_inside) > int(pins["evidence"]["max_total_bytes"]):
-                raise RuntimeError("inside-summary.json exceeded max_total_bytes")
+        try:
+            st_sum = os.lstat(inside_summary_path)
+        except FileNotFoundError:
+            st_sum = None
+        if st_sum is not None:
+            if stat.S_ISLNK(st_sum.st_mode) or not stat.S_ISREG(st_sum.st_mode):
+                raise RuntimeError("inside-summary.json is not a regular file")
+            raw_inside = read_regular_file_bounded(inside_summary_path, int(st_sum.st_size), max_file_bytes)
             inside_summary = json.loads(raw_inside.decode("utf-8"))
 
         report["stages"]["inside"] = inside_summary
@@ -835,21 +1068,21 @@ def main() -> int:
             "duration_seconds": round(time.monotonic() - s7_start, 3),
             "audit_started_after_closure_utc": utc_now(),
             "post_audit": post_audit,
-            "container_removed_confirmed": (remaining_containers == ""),
+            "container_removed_confirmed": bool(closure_rec.get("closure_confirmed")),
         }
 
         # Final strict fail-closed verification
         if timed_out_waiting:
             raise RuntimeError("Container execution timed out")
-        if state_obj.get("Running") is not False:
+        if t_insp.get("running") is not False or t_insp.get("pid") not in (0, None) or t_insp.get("status") != "exited":
             raise RuntimeError("Container still running at inspect")
-        if state_obj.get("OOMKilled") is not False:
+        if t_insp.get("oom_killed") is not False:
             raise RuntimeError("Container was OOMKilled")
-        if state_obj.get("ExitCode") != 0:
-            raise RuntimeError(f"Container exited with non-zero code: {state_obj.get('ExitCode')}")
-        if not state_obj.get("FinishedAt") or state_obj.get("FinishedAt").startswith("0001-"):
+        if t_insp.get("exit_code") != 0:
+            raise RuntimeError(f"Container exited with non-zero code: {t_insp.get('exit_code')}")
+        if not t_insp.get("finished_at") or str(t_insp.get("finished_at")).startswith("0001-"):
             raise RuntimeError("Container FinishedAt timestamp invalid")
-        if remaining_containers != "":
+        if closure_rec.get("post_rm_name_scan") != "":
             raise RuntimeError("Owned container still present after rm")
         if not inside_summary or inside_summary.get("ok") is not True:
             raise RuntimeError(f"inside.mjs reported failure: {inside_summary.get('failure_reason') if inside_summary else 'missing summary'}")
@@ -862,6 +1095,10 @@ def main() -> int:
         report["ok"] = True
         report["finished_at_utc"] = utc_now()
         report["total_duration_seconds"] = round(time.monotonic() - t0, 3)
+        if workspace_dir and workspace_dir.exists():
+            shutil.rmtree(workspace_dir, ignore_errors=True)
+            report["cleanup"]["workspace_removed"] = not workspace_dir.exists()
+        workspace_dir = None
         emit_framed_report(report)
         return 0
 
@@ -870,32 +1107,58 @@ def main() -> int:
         report["failure_reason"] = str(exc)
         report["finished_at_utc"] = utc_now()
         report["total_duration_seconds"] = round(time.monotonic() - t0, 3)
-        if workspace_dir:
-            ev_dir = workspace_dir / "evidence"
-            if (ev_dir / "inside-summary.json").is_file() and not report["stages"].get("inside"):
+        if "container_closure" not in report["cleanup"]:
+            closure_rec = reconcile_and_close_container(
+                container_name=container_name,
+                pinned_image_id=img_id,
+                create_intent=create_intent,
+                create_outcome=create_outcome,
+                created_id_from_cli=created_id_from_cli,
+                preexisting_before_intent=preexisting_before_intent,
+                wait_rc_str=wait_rc_str,
+                timed_out_waiting=timed_out_waiting,
+            )
+            report["cleanup"]["container_closure"] = closure_rec
+            report["cleanup"]["container_removed_before_audit"] = bool(closure_rec.get("closure_confirmed"))
+        else:
+            closure_rec = report["cleanup"]["container_closure"]
+
+        if workspace_dir and closure_rec.get("closure_confirmed"):
+            if product_dir and product_dir.is_dir() and "post_audit" not in report["stages"]:
                 try:
-                    report["stages"]["inside"] = json.loads(
-                        (ev_dir / "inside-summary.json").read_text(encoding="utf-8")
-                    )
-                except Exception:
-                    pass
-            if "evidence_emission" not in report["stages"]:
-                try:
-                    report["stages"]["evidence_emission"] = emit_evidence_files(
-                        ev_dir, max_file_bytes, max_total_bytes, require_all=False
-                    )
-                except Exception as ev_exc:
-                    report["stages"]["evidence_emission"] = {"ok": False, "errors": [str(ev_exc)]}
+                    report["stages"]["post_audit"] = {
+                        "ok": True,
+                        "audit_started_after_closure_utc": utc_now(),
+                        "post_audit": verify_directory_against_pins(
+                            product_dir, pins["product"]["files"], int(pins["product"]["total_bytes"])
+                        ),
+                        "container_removed_confirmed": True,
+                    }
+                except Exception as pa_exc:
+                    report["stages"]["post_audit"] = {"ok": False, "error": str(pa_exc)}
+            if evidence_dir and evidence_dir.is_dir():
+                sum_fp = evidence_dir / "inside-summary.json"
+                if not report["stages"].get("inside"):
+                    try:
+                        st_s = os.lstat(sum_fp)
+                        if not stat.S_ISLNK(st_s.st_mode) and stat.S_ISREG(st_s.st_mode):
+                            raw_s = read_regular_file_bounded(sum_fp, int(st_s.st_size), max_file_bytes)
+                            report["stages"]["inside"] = json.loads(raw_s.decode("utf-8"))
+                    except Exception:
+                        pass
+                if "evidence_emission" not in report["stages"]:
+                    try:
+                        report["stages"]["evidence_emission"] = emit_evidence_files(
+                            evidence_dir, max_file_bytes, max_total_bytes, require_all=False
+                        )
+                    except Exception as ev_exc:
+                        report["stages"]["evidence_emission"] = {"ok": False, "errors": [str(ev_exc)]}
+            shutil.rmtree(workspace_dir, ignore_errors=True)
+            report["cleanup"]["workspace_removed"] = not workspace_dir.exists()
+        elif workspace_dir:
+            report["cleanup"]["workspace_retained_due_to_unconfirmed_closure"] = True
         emit_framed_report(report)
         return 1
-    finally:
-        if container_created:
-            try:
-                subprocess.run(["docker", "rm", "-f", container_name], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15, check=False)
-            except Exception:
-                pass
-        if workspace_dir and workspace_dir.exists():
-            shutil.rmtree(workspace_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
