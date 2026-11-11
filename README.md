@@ -8,7 +8,7 @@ Authorize/capture is not escrow and not a licensed custody service. Everything h
 
 ```bash
 node --version   # 22+
-npm test         # 90 tests: the 19 scenarios (V1-V6, F1-F8, H1-H2, I1-I2, C19) plus restart, isolation and HTTP tests; no PayPal call
+npm test         # unit suite; exact counts are in the CI run, no PayPal call
 npm start        # http://localhost:8787 , fixture mode (public)
 npm run demo:ai  # defective lots: rules verdict, fixed template explanation, model explanation (only with GEMINI_API_KEY), checker
 ```
@@ -27,7 +27,7 @@ The REST client talks only to `https://api-m.sandbox.paypal.com`: there is no pr
 
 Run fixture and sandbox as two separate processes. The fixture is public: one simulator per order, each order bound to the visitor's session (another visitor gets "not found"), a cap on orders per session. The sandbox is protected: every order route needs the operator login, and the login gets a new session id. In both modes every POST needs the session cookie (HttpOnly, SameSite=Strict), the per-session CSRF token in `X-CG-CSRF` and a same-origin `Origin` header. The signed PayPal webhook is the only POST without a session.
 
-Optional advisory model: `GEMINI_API_KEY` (and `GEMINI_MODEL`). Without it the UI shows "advisory unavailable" and nothing else changes. Model calls are capped per order, per session and per day (`LLM_MAX_PER_ORDER`=3, `LLM_MAX_PER_SESSION`=5, `LLM_MAX_PER_DAY`=50), counted before the call.
+Optional advisory explanation: `GEMINI_API_KEY`, using the allowlisted `gemini-3.5-flash-lite` model (`GEMINI_MODEL` must match). The adapter sends only a deterministic report to the fixed Google API origin, refuses redirects, bounds input/output and timeout, requires a complete STOP response and excludes thought parts. Errors exposed to the UI use fixed public codes. `fixtures/L0/AI-EXPECTED-FACTS-20261111.json` freezes three synthetic evaluation lots before live answers; `demo:ai` accepts exactly those lots and verifies their hashes before any call. A live evaluation is a separately controlled, single invocation capped at three calls with no retries; do not run it repeatedly. Without it the UI shows "advisory unavailable" and nothing else changes. Model calls are capped per order, per session and per day (`LLM_MAX_PER_ORDER`=3, `LLM_MAX_PER_SESSION`=5, `LLM_MAX_PER_DAY`=50), counted before the call.
 
 ## How it works
 
@@ -44,7 +44,7 @@ Safety rules in code (`src/pedido.mjs`): every external call (create, authorize,
 After a check with findings, `Suggest fixes` lists, per finding, what the supplier should change. The suggestions only feed a redelivery request written from a fixed template in Spanish or Portuguese. They never change the delivered file, the report, the verdict, the capture rules or any PayPal state, and a person accepts each one.
 
 - **Rule-based baseline (B1)**, always on: number words in Spanish and Portuguese from 0 to 999, unit words, spaces, sku case, the approved sample value, and a split decimal only when the comma-in-name reading is invalid. A currency marker or currency word always goes back to the supplier: nothing is stripped or converted.
-- **AI suggestions** are OFF. No AI provider ships in this build: the model id and price are not verified and no AI key is authorized, so environment variables cannot turn it on. The adapter takes an injected provider, has a 15 s timeout, a 16 KB answer cap and the same advisory budget as the explanation.
+- **AI suggestions** are OFF. The C3 repair-suggestion feature has no live provider enabled; environment variables cannot turn it on. This is separate from the optional advisory explanation described above. The adapter takes an injected provider, has a 15 s timeout, a 16 KB answer cap and the same advisory budget as the explanation.
 - Every model answer must match a strict JSON schema. A deterministic checker refuses values for currency cells, ambiguous split lines, empty cells, keys and duplicates; when the cell has digits, only the rule-based reading is allowed; a word reading is allowed only for short cells and is flagged for the person. Supplier text is sent as data and is never followed as instructions. Model text never reaches the supplier.
 - C3a: a built request is shown only while its order, lot, delivery revision, decisions and language are unchanged; accepted values are written complete on their own line (received values are labelled previews); an AI answer that arrives after the delivery changed is discarded; provider errors reach the store and the view only as fixed public codes.
 - Evaluation: `fixtures/C3` holds two development lots and two reserved lots with one label per finding, frozen with sha256 in `MANIFEST.json` before any model output existed. `npm run eval:c3` scores B1 and, if given recorded answers, the model before and after the checker. No result of the model is claimed here.
@@ -66,7 +66,7 @@ After a check with findings, `Suggest fixes` lists, per finding, what the suppli
 
 ## Not done yet
 
-First sandbox receipt (needs the sandbox app credentials in the server environment), hosted demo, video. Webhook postback verification through `verify-webhook-signature` is not used; self-verification is.
+Real end-to-end Sandbox order/approval/authorization/capture/webhook evidence, real advisory evaluation and the demonstration video are still pending. Existing CI run 42974702939 qualified product 51a653a with 109 unit tests, C3a Chromium and all seven U1 browser scenarios; it does not qualify this later advisory source or prove real provider calls. Credentials are private server configuration, never in this repository. A hosted demo is optional; local fixture instructions are above. Webhook postback verification through `verify-webhook-signature` is not used; self-verification is.
 
 ## License
 

@@ -2,6 +2,7 @@
 // Without GEMINI_API_KEY it prints only the fixed explanation and the checker on a canned bad text (labeled as canned).
 // The checker verifies citations only (lines exist and carry a finding); it does not prove the explanation is right.
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { validar } from './validar.mjs';
 import { B0 } from './brief.mjs';
 import { checarParecer, explicacaoFixa, linhasCitadas, geradorGemini } from './parecer.mjs';
@@ -9,8 +10,23 @@ import { checarParecer, explicacaoFixa, linhasCitadas, geradorGemini } from './p
 const ler = (n) => readFileSync(new URL(`../fixtures/L0/${n}`, import.meta.url), 'utf8');
 const AMOSTRA = ler('AMOSTRA-L0-linhas-2-11.csv');
 const gerar = process.env.GEMINI_API_KEY ? geradorGemini() : null;
+const esperado = JSON.parse(ler('AI-EXPECTED-FACTS-20261111.json'));
+if (esperado.approved_sample.file !== 'AMOSTRA-L0-linhas-2-11.csv' || createHash('sha256').update(AMOSTRA).digest('hex') !== esperado.approved_sample.sha256) {
+  throw new Error('Frozen approved sample integrity mismatch');
+}
+const nomes = esperado.lots.map((l) => l.file);
+const lotes = process.argv.slice(2).length ? process.argv.slice(2) : nomes;
+if (nomes.length !== 3 || lotes.length !== 3 || new Set(lotes).size !== 3 || lotes.some((n) => !nomes.includes(n))) {
+  throw new Error('AI qualification requires exactly the three frozen lots');
+}
+// Verify every frozen input before the first possible provider call. No caller-supplied path is read.
+for (const l of esperado.lots) {
+  if (!/^L0-V[256]\.csv$/.test(l.file) || createHash('sha256').update(ler(l.file)).digest('hex') !== l.sha256) {
+    throw new Error('Frozen advisory input integrity mismatch');
+  }
+}
 
-for (const lote of (process.argv.slice(2).length ? process.argv.slice(2) : ['L0-V2.csv', 'L0-V5.csv', 'L0-V6.csv'])) {
+for (const lote of lotes) {
   const rel = validar(B0, ler(lote), AMOSTRA);
   console.log(`\n=== ${lote}: verdict ${rel.veredito} (decided by rules, not by any model)`);
   const fixa = explicacaoFixa(rel);
@@ -21,5 +37,9 @@ for (const lote of (process.argv.slice(2).length ? process.argv.slice(2) : ['L0-
   try {
     const t = await gerar(rel, B0);
     console.log(`model          : ${t}\n  lines ${linhasCitadas(t).join(', ')} · checker ${JSON.stringify(checarParecer(t, rel))}`);
-  } catch (e) { console.log(`model          : unavailable (${e.message})`); }
+  } catch (e) {
+    console.log(`model          : unavailable (${e.codigo || 'advisory_unavailable'}); remaining calls stopped, no retry`);
+    process.exitCode = 1;
+    break;
+  }
 }

@@ -302,3 +302,67 @@ test('fixed template explanation of each defective lot passes the checker; a can
     assert.match(checarParecer(`${t} Line 47 also looks odd.`, rel).motivo, /no finding|does not exist/);
   }
 });
+
+
+// Final advisory qualification: mocked HTTP only; never a provider key or network call.
+test('Gemini advisory: fixed model and origin, no redirects, bounded output and stable errors', async () => {
+  const { geradorGemini } = await import('../src/parecer.mjs');
+  const { validar } = await import('../src/validar.mjs');
+  const rel = validar(B0, ler('L0-V2.csv'), AMOSTRA);
+  const chave = 'SYNTHETIC-ADVISORY-CANARY-DO-NOT-LEAK';
+  let chamadas = 0;
+  const resposta = (texto) => new Response(JSON.stringify({ candidates: [{ finishReason: 'STOP', content: { parts: [{ text: texto }] } }] }));
+  const gerar = geradorGemini({ chave, fetchImpl: async (url, init) => {
+    chamadas++;
+    assert.equal(url, 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent');
+    assert.equal(init.redirect, 'error');
+    assert.equal(init.headers['x-goog-api-key'], chave);
+    assert.ok(!init.body.includes(chave));
+    const body = JSON.parse(init.body);
+    assert.equal(body.generationConfig.thinkingConfig.thinkingLevel, 'MINIMAL');
+    assert.equal(body.generationConfig.maxOutputTokens, 2048);
+    assert.equal(Object.hasOwn(body.generationConfig, 'temperature'), false);
+    return resposta('Lines 46, 121 and 178 have missing prices.');
+  } });
+  assert.equal(await gerar(rel, B0), 'Lines 46, 121 and 178 have missing prices.');
+  assert.equal(chamadas, 1);
+  assert.throws(() => geradorGemini({ chave, modelo: '../escape', fetchImpl: () => { chamadas++; } }), /Unsupported advisory model/);
+  assert.equal(chamadas, 1, 'invalid model never reaches a transport');
+  const testar = async (fetchImpl, codigo, extra = {}) => {
+    const g = geradorGemini({ chave, fetchImpl, ...extra });
+    await assert.rejects(g(rel, B0), (e) => e.codigo === codigo && !e.message.includes(chave) && !e.stack.includes(chave));
+  };
+  await testar(async () => { throw new TypeError(`redirect failed with ${chave}`); }, 'advisory_unavailable');
+  await testar(async () => new Response(chave, { status: 429 }), 'advisory_http');
+  await testar(async () => new Response(chave.repeat(2000)), 'advisory_too_large');
+  await testar(async () => resposta('x'.repeat(8193)), 'advisory_too_large');
+  await testar(async () => new Response(`invalid JSON ${chave}`), 'advisory_invalid');
+  await testar(async () => new Response('{"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":123}]}}]}'), 'advisory_invalid');
+  await testar(async () => new Response('{"candidates":[{"finishReason":"MAX_TOKENS","content":{"parts":[{"text":"Line 46 has missing price."}]}}]}'), 'advisory_invalid');
+  const semPensamento = geradorGemini({ chave, fetchImpl: async () => new Response(JSON.stringify({ candidates: [{ finishReason: 'STOP', content: { parts: [{ thought: true, text: 'private reasoning summary' }, { thoughtSignature: 'opaque-test-signature' }, { text: 'Line 46 has missing price.' }] } }] })) });
+  assert.equal(await semPensamento(rel, B0), 'Line 46 has missing price.');
+  await testar(async (_url, init) => new Response(new ReadableStream({
+    start(controller) { init.signal.addEventListener('abort', () => controller.error(new Error(chave)), { once: true }); },
+  })), 'advisory_timeout', { timeoutMs: 10 });
+});
+
+test('frozen advisory facts match actual deterministic report findings', async () => {
+  const { validar } = await import('../src/validar.mjs');
+  const { createHash } = await import('node:crypto');
+  const facts = JSON.parse(ler('AI-EXPECTED-FACTS-20261111.json'));
+  assert.deepEqual(facts.lots.map((x) => x.file), ['L0-V2.csv', 'L0-V5.csv', 'L0-V6.csv']);
+  assert.equal(createHash('sha256').update(ler(facts.approved_sample.file)).digest('hex'), facts.approved_sample.sha256);
+  const reports = facts.lots.map((x) => {
+    const csv = ler(x.file);
+    assert.equal(createHash('sha256').update(csv).digest('hex'), x.sha256);
+    const r = validar(B0, csv, AMOSTRA);
+    const lines = [...new Set([...r.rejeicoes.map((z) => z.linha), ...r.duplicatas.flatMap((z) => z.linhas), ...r.amostra.filter((z) => !z.confere).map((z) => z.linha)])].sort((a,b) => a-b);
+    assert.deepEqual(lines, x.expected_finding_lines);
+    return r;
+  });
+  assert.equal(reports[0].rejeicoes.length, 3);
+  assert.ok(reports[0].rejeicoes.every((x) => x.campo === 'precio'));
+  assert.equal(reports[1].duplicatas.length, 1);
+  assert.equal(reports[1].duplicatas[0].chave, 'ABC-0042');
+  assert.deepEqual(reports[2].amostra.filter((x) => !x.confere).map((x) => [x.linha,x.campo,x.recebido,x.esperado]), [[6,'precio','2.58','2.85']]);
+});

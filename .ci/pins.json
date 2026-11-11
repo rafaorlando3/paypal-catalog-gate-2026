@@ -1,10 +1,10 @@
 {
   "schema": "catalog-gate-ci-offline-v1",
   "product": {
-    "commit": "51a653a807d068d2e36acb6954c0db319519b370",
-    "tree": "0f12c71ecd1e33608166c711e9aeb4462b91da00",
-    "blobs": 55,
-    "total_bytes": 364932,
+    "commit": "e7955eda8e9413224a6b7541be40e5ede4638a57",
+    "tree": "1ccf561d97bb360915ac97434465672dfc5f8351",
+    "blobs": 56,
+    "total_bytes": 376269,
     "files": [
       {
         "path": ".gitignore",
@@ -23,9 +23,9 @@
       {
         "path": "README.md",
         "mode": "100644",
-        "blob": "36fd5a6be1d5b70de1c0a10b9af27ce00d125ccc",
-        "bytes": 9315,
-        "sha256": "e659cd4e98820e733141a06d9459c52751d8069edb22309f6c10e44675cff907"
+        "blob": "4c00006c79efba1330c1bc2c39206a48ba2ec1f2",
+        "bytes": 10293,
+        "sha256": "8bdc57599b83f69480736036e3844176320d345fd24ec87cbf5d8847a8ec29ff"
       },
       {
         "path": "fixtures/C3/C3-H1-reservado-es.csv",
@@ -89,6 +89,13 @@
         "blob": "0f18bb1e46d90a5908dfb3eb21d53bd3253139e3",
         "bytes": 2661,
         "sha256": "3a27f7b0d058eed98fb2ff67e5b5028c247516a1fe2e9ab740bd7adac9dd16f3"
+      },
+      {
+        "path": "fixtures/L0/AI-EXPECTED-FACTS-20261111.json",
+        "mode": "100644",
+        "blob": "ab189102f6e9d900af3cffd5057a78ea0e68cd0e",
+        "bytes": 1916,
+        "sha256": "7358c6749f507fd31ec87a253edfdb1cb9c8af109df048c8d28b78b5baa38d6b"
       },
       {
         "path": "fixtures/L0/AMOSTRA-L0-linhas-2-11.csv",
@@ -212,9 +219,9 @@
       {
         "path": "src/demo-ia.mjs",
         "mode": "100644",
-        "blob": "a49cb59ff5423054d55c269427676496d0ebad47",
-        "bytes": 1766,
-        "sha256": "53e3c535946a84c0355b8bbc051845b74dbd12fd228e492bd178c4aa0ef0dabe"
+        "blob": "f9242e893a1ca7f67e236570576bd6128c3a55ad",
+        "bytes": 2757,
+        "sha256": "9f18ad3dab35bf01ba37193a8ba9b3bbf2c3549b9070fc561f9ecfd2c055d50b"
       },
       {
         "path": "src/gerar_l0.mjs",
@@ -226,9 +233,9 @@
       {
         "path": "src/parecer.mjs",
         "mode": "100644",
-        "blob": "98065dd05fdcaff52634b3de5c1330f15554ca49",
-        "bytes": 4541,
-        "sha256": "166de1c08ed9ccea33092d9998267f9ca2ebc051470974204e2f71990fd35e4d"
+        "blob": "a860549b1bf41d7c9ce1c9929267a94e748dd5b8",
+        "bytes": 7436,
+        "sha256": "30a595a6f37be9ada514e1024248c14a9891706b487ca3d72b1c462e53b99ed3"
       },
       {
         "path": "src/paypal-fixture.mjs",
@@ -289,9 +296,9 @@
       {
         "path": "test/c1b.test.mjs",
         "mode": "100644",
-        "blob": "30694f2d1aa5f0b9b9b0ed6c9b083553dd843d4f",
-        "bytes": 19514,
-        "sha256": "89ab317c17fb8ced244e3cd1c5683e9c3e98fb7456b917f2263938e2641fd5d7"
+        "blob": "ab4cbd58ecfab6e110b00b4e2935a68ef76960cb",
+        "bytes": 24071,
+        "sha256": "d13488549d70051171fb3414e8d9a886343122d824d194b70af12c49960fd4a0"
       },
       {
         "path": "test/c2b.test.mjs",

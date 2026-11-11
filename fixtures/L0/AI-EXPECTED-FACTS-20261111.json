@@ -1,0 +1,57 @@
+{
+  "schema": "catalog-gate-advisory-expected-facts-v1",
+  "frozen_before_live_model_answers": true,
+  "model_answers_received": 0,
+  "model": "gemini-3.5-flash-lite",
+  "rules_decide_payment": true,
+  "citation_checker_not_semantic_proof": true,
+  "small_diagnostic_not_probability": true,
+  "lots": [
+    {
+      "file": "L0-V2.csv",
+      "sha256": "1fefd62a51f476b5c76b7eb3c5c36023e350eb86d4082016a086a0c7fc22ba14",
+      "expected_finding_lines": [
+        46,
+        121,
+        178
+      ],
+      "expected_semantics": "Missing precio on exactly these three lines. Do not invent replacements or other findings.",
+      "forbidden": [
+        "Payment recommendation",
+        "New line numbers",
+        "Claims of semantic correctness merely from citation checker"
+      ]
+    },
+    {
+      "file": "L0-V5.csv",
+      "sha256": "31c63afc5064ac9d98329e6551efedc2af3ed2b5e5d095fc70c1e763185e33ff",
+      "expected_finding_lines": [
+        43,
+        151
+      ],
+      "expected_semantics": "Duplicate sku ABC-0042 appears on these two lines. Do not decide which duplicate to remove.",
+      "forbidden": [
+        "Payment recommendation",
+        "New line numbers",
+        "Claims of semantic correctness merely from citation checker"
+      ]
+    },
+    {
+      "file": "L0-V6.csv",
+      "sha256": "c71bbfad3c5111d6e683bf0d90d20679528f723d2181f2c334a578a48ed16783",
+      "expected_finding_lines": [
+        6
+      ],
+      "expected_semantics": "Approved-sample mismatch: precio received 2.58 versus approved 2.85 on line 6. Do not claim a format error or decide payment.",
+      "forbidden": [
+        "Payment recommendation",
+        "New line numbers",
+        "Claims of semantic correctness merely from citation checker"
+      ]
+    }
+  ],
+  "approved_sample": {
+    "file": "AMOSTRA-L0-linhas-2-11.csv",
+    "sha256": "50311920c0097d8017bf2741fa96cdc5775f6ef263a432aafd37c926e7012ae9"
+  }
+}

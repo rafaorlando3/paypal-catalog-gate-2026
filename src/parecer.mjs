@@ -34,20 +34,71 @@ export function prompt(rel, brief) {
 }
 
 /** Optional live advisor (Gemini REST). Without a key it throws, and the UI shows "advisory unavailable". */
-export function geradorGemini({ chave = process.env.GEMINI_API_KEY, modelo = process.env.GEMINI_MODEL || 'gemini-2.5-flash', timeoutMs = 15000 } = {}) {
+export function geradorGemini({ chave = process.env.GEMINI_API_KEY, modelo = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite', timeoutMs = 15000, fetchImpl = globalThis.fetch } = {}) {
+  // Only this verified model is qualified; an environment value cannot alter the URL path.
+  if (modelo !== 'gemini-3.5-flash-lite') throw new Error('Unsupported advisory model');
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60000) throw new Error('Invalid advisory timeout');
+  if (typeof fetchImpl !== 'function') throw new Error('Invalid advisory transport');
+  const erro = (codigo) => {
+    const mensagens = {
+      advisory_timeout: 'AI advisory timeout',
+      advisory_http: 'AI advisory HTTP error',
+      advisory_too_large: 'AI advisory response too large',
+      advisory_invalid: 'AI advisory invalid response',
+      advisory_unavailable: 'AI advisory unavailable',
+      advisory_input: 'AI advisory input too large',
+    };
+    const e = new Error(mensagens[codigo]); e.codigo = codigo; return e;
+  };
   return async (rel, brief) => {
-    if (!chave) throw new Error('GEMINI_API_KEY not set');
+    if (!chave) throw erro('advisory_unavailable');
     if (!rel.rejeicoes.length && !rel.duplicatas.length && rel.amostra.every((a) => a.confere)) return `All ${rel.validas} rows passed the agreed rules and the approved sample matches.`;
+    const textoPrompt = prompt(rel, brief);
+    if (Buffer.byteLength(textoPrompt, 'utf8') > 16384) throw erro('advisory_input');
     const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
-      const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent`, {
-        method: 'POST', signal: ctrl.signal,
+      const r = await fetchImpl(`https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent`, {
+        method: 'POST', signal: ctrl.signal, redirect: 'error',
         headers: { 'content-type': 'application/json', 'x-goog-api-key': chave },
-        body: JSON.stringify({ contents: [{ parts: [{ text: prompt(rel, brief) }] }], generationConfig: { temperature: 0, maxOutputTokens: 300 } }),
+        body: JSON.stringify({ contents: [{ parts: [{ text: textoPrompt }] }], generationConfig: { maxOutputTokens: 2048, thinkingConfig: { thinkingLevel: 'MINIMAL' } } }),
       });
-      if (!r.ok) throw new Error(`model returned ${r.status}`);
-      const j = await r.json();
-      return j.candidates?.[0]?.content?.parts?.map((x) => x.text).join('') || '';
+      if (!r.ok) {
+        await r.body?.cancel().catch(() => {});
+        const e = erro('advisory_http');
+        if (Number.isInteger(r.status)) e.status = r.status;
+        throw e;
+      }
+      if (!r.body || typeof r.body.getReader !== 'function') throw erro('advisory_invalid');
+      const reader = r.body.getReader(); const partes = []; let bytes = 0;
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          bytes += value.byteLength;
+          if (bytes > 65536) { await reader.cancel().catch(() => {}); throw erro('advisory_too_large'); }
+          partes.push(Buffer.from(value));
+        }
+      } finally { reader.releaseLock(); }
+      let j;
+      try { j = JSON.parse(Buffer.concat(partes, bytes).toString('utf8')); }
+      catch { throw erro('advisory_invalid'); }
+      const candidato = j?.candidates?.[0];
+      if (candidato?.finishReason !== 'STOP') throw erro('advisory_invalid');
+      const partesRecebidas = candidato?.content?.parts;
+      if (!Array.isArray(partesRecebidas)) throw erro('advisory_invalid');
+      const partesTexto = partesRecebidas.filter((x) => x?.thought !== true && !(x && typeof x === 'object' && !Object.hasOwn(x, 'text') && typeof x.thoughtSignature === 'string' && Object.keys(x).every((k) => k === 'thoughtSignature')));
+      if (!Array.isArray(partesTexto) || partesTexto.some((x) => typeof x?.text !== 'string')) throw erro('advisory_invalid');
+      const texto = partesTexto.map((x) => x.text).join('');
+      if (Buffer.byteLength(texto, 'utf8') > 8192) throw erro('advisory_too_large');
+      return texto;
+    } catch (e) {
+      if (ctrl.signal.aborted) throw erro('advisory_timeout');
+      if (e && ['advisory_http', 'advisory_too_large', 'advisory_invalid'].includes(e.codigo)) {
+        const publico = erro(e.codigo);
+        if (e.codigo === 'advisory_http' && Number.isInteger(e.status)) publico.status = e.status;
+        throw publico;
+      }
+      throw erro('advisory_unavailable');
     } finally { clearTimeout(t); }
   };
 }
