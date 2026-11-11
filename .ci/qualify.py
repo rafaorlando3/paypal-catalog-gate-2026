@@ -414,13 +414,9 @@ def reconcile_and_close_container(
         return rec
 
     if len(found_ids) == 0:
-        if create_outcome == "FAILED_DEFINITE":
-            rec["closure_status"] = "CREATE_FAILED_NO_CONTAINER"
-            rec["closure_confirmed"] = True
-        else:
-            rec["errors"].append(
-                f"create_outcome={create_outcome} but no container found by name; cannot prove absence of in-flight daemon creation"
-            )
+        rec["errors"].append(
+            f"create_intent=True (create_outcome={create_outcome}) but no container found by name; cannot prove absence of in-flight daemon creation"
+        )
         return rec
 
     cid = found_ids[0]
@@ -498,7 +494,7 @@ def reconcile_and_close_container(
         "observed_closed_at_utc": utc_now(),
     }
 
-    if terminal_running is not False or terminal_pid not in (0, None) or terminal_status not in ("created", "exited", "dead"):
+    if terminal_running is not False or terminal_pid != 0 or terminal_status not in ("created", "exited", "dead"):
         rec["errors"].append(
             f"Container not in terminal state before rm: status={terminal_status}, running={terminal_running}, pid={terminal_pid}"
         )
@@ -863,7 +859,7 @@ def main() -> int:
             raise RuntimeError(f"docker create execution error (outcome uncertain): {exc}") from exc
 
         if create_res.returncode != 0:
-            create_outcome = "FAILED_DEFINITE"
+            create_outcome = "UNCERTAIN"
             raise RuntimeError(f"docker create failed (rc={create_res.returncode}): {create_res.stderr.strip()[:400]}")
 
         container_id = create_res.stdout.strip()
@@ -1023,8 +1019,6 @@ def main() -> int:
         except subprocess.TimeoutExpired:
             timed_out_waiting = True
             wait_rc_str = "TIMEOUT"
-            run_cmd(["docker", "kill", container_name], timeout=15, check=False)
-            run_cmd(["docker", "wait", container_name], timeout=15, check=False)
 
         closure_rec = reconcile_and_close_container(
             container_name=container_name,
@@ -1074,7 +1068,7 @@ def main() -> int:
         # Final strict fail-closed verification
         if timed_out_waiting:
             raise RuntimeError("Container execution timed out")
-        if t_insp.get("running") is not False or t_insp.get("pid") not in (0, None) or t_insp.get("status") != "exited":
+        if t_insp.get("running") is not False or t_insp.get("pid") != 0 or t_insp.get("status") != "exited":
             raise RuntimeError("Container still running at inspect")
         if t_insp.get("oom_killed") is not False:
             raise RuntimeError("Container was OOMKilled")
