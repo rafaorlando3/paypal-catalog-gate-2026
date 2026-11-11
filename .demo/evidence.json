@@ -1,0 +1,29 @@
+{
+  "schema": "catalog-gate-public-demo-evidence-v1",
+  "real_sandbox_complete": true,
+  "product": "e7955eda8e9413224a6b7541be40e5ede4638a57",
+  "ai": {
+    "attempts": 2,
+    "answers": 1,
+    "second": "advisory_timeout",
+    "third": "not_attempted",
+    "answer_text": "Your catalog import check resulted in a yellow status. We processed 200 expected rows with the required columns, and row counts met the 2% tolerance. However, the precio field is missing on line 46, line 121, and line 178. Please review these specific lines and update your file before proceeding."
+  },
+  "sandbox": {
+    "capture": {
+      "id": "7YK28292045248338",
+      "status": "COMPLETED",
+      "amount": "50.00",
+      "currency": "USD",
+      "final_capture": true
+    },
+    "webhook": {
+      "event_id": "WH-1PL052928A4639510-49N404522P1527148",
+      "event_type": "PAYMENT.CAPTURE.COMPLETED",
+      "capture_id": "7YK28292045248338",
+      "signature_verified": true
+    },
+    "human_exact_acceptance": true,
+    "buyer_approved": true
+  }
+}
