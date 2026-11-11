@@ -1,10 +1,10 @@
 {
   "schema": "catalog-gate-ci-offline-v1",
   "product": {
-    "commit": "483670c64ae55c08ac823217fc8dbdb8442bbb0f",
-    "tree": "2824b71b2034785e3d95b111cb706380d90eabc2",
+    "commit": "e0b68f2d7ab6f100e38d1bc1cbea616d32bef16d",
+    "tree": "2621636020b9e7f80b4a6293b458a0e8a81aae5e",
     "blobs": 55,
-    "total_bytes": 358066,
+    "total_bytes": 363354,
     "files": [
       {
         "path": ".gitignore",
@@ -359,9 +359,9 @@
       {
         "path": "test/e2e/c3au1-respostas-atrasadas.e2e.cjs",
         "mode": "100644",
-        "blob": "efca5083ed5aaa95eebdcb387cb64b2fcd13b752",
-        "bytes": 12973,
-        "sha256": "df194e0ae92a7bfc7eb5c66e7c89198a9a9ffbe25bd63c1cd07ccebc0bdd1886"
+        "blob": "869837a6f334ab44dc39d1b551782d48231ad9b5",
+        "bytes": 18261,
+        "sha256": "c096d89202a619e72b114a74092e1798c3c3af153e8f147a7735ba7e060f4079"
       },
       {
         "path": "test/servidor.test.mjs",
