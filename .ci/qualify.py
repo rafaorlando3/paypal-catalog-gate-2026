@@ -1172,6 +1172,7 @@ def main() -> int:
         return 0
 
     except Exception as exc:
+        signal.setitimer(signal.ITIMER_REAL, 0)
         report["ok"] = False
         report["failure_reason"] = str(exc)
         if "container_closure" not in report["cleanup"]:
