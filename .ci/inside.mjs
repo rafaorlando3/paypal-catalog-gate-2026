@@ -110,12 +110,34 @@ function killProcessGroup(pid, sig) {
 function runSubprocess(label, cmd, args, { cwd, env, timeoutMs }) {
   return new Promise((resolve) => {
     const t0 = Date.now();
-    const child = spawn(cmd, args, {
-      cwd,
-      env,
-      detached: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    let child;
+    try {
+      child = spawn(cmd, args, {
+        cwd,
+        env,
+        detached: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (spawnSyncErr) {
+      const emptyBuf = Buffer.alloc(0);
+      const outMeta = writeEvidenceFile(`${label}.stdout.log`, emptyBuf);
+      const errMeta = writeEvidenceFile(`${label}.stderr.log`, emptyBuf);
+      resolve({
+        label,
+        not_started: true,
+        spawn_error: String(spawnSyncErr && spawnSyncErr.message ? spawnSyncErr.message : spawnSyncErr),
+        exit_code: null,
+        signal: null,
+        timed_out: false,
+        truncated: false,
+        duration_ms: Date.now() - t0,
+        stdout: '',
+        stderr: '',
+        stdout_meta: outMeta,
+        stderr_meta: errMeta,
+      });
+      return;
+    }
 
     const stdoutChunks = [];
     const stderrChunks = [];
@@ -124,6 +146,12 @@ function runSubprocess(label, cmd, args, { cwd, env, timeoutMs }) {
     let truncated = false;
     let timedOut = false;
     let killTimer = null;
+    let spawnErrStr = null;
+    let settled = false;
+
+    child.on('error', (err) => {
+      spawnErrStr = String(err && err.message ? err.message : err);
+    });
 
     const mainTimer = setTimeout(() => {
       timedOut = true;
@@ -154,6 +182,8 @@ function runSubprocess(label, cmd, args, { cwd, env, timeoutMs }) {
     });
 
     child.on('close', (code, signal) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(mainTimer);
       if (killTimer) clearTimeout(killTimer);
       killProcessGroup(child.pid, 'SIGKILL');
@@ -163,7 +193,9 @@ function runSubprocess(label, cmd, args, { cwd, env, timeoutMs }) {
       const errMeta = writeEvidenceFile(`${label}.stderr.log`, errBuf);
       resolve({
         label,
-        exit_code: code,
+        not_started: spawnErrStr !== null && code === null && signal === null,
+        spawn_error: spawnErrStr,
+        exit_code: typeof code === 'number' ? code : null,
         signal: signal || null,
         timed_out: timedOut,
         truncated,
@@ -254,17 +286,34 @@ function parseTapOutput(tapText) {
   const diagSkipped = summaryMetric(/^# skipped\s+(\d+)/m);
   const diagTodo = summaryMetric(/^# todo\s+(\d+)/m);
 
+  const footerFields = [diagTests, diagPass, diagFail, diagCancelled, diagSkipped, diagTodo];
+  const footerAllPresent = footerFields.every((v) => typeof v === 'number' && Number.isInteger(v) && v >= 0);
+  const footerSumConsistent = footerAllPresent && (diagPass + diagFail + diagCancelled + diagSkipped + diagTodo === diagTests);
+  const planConsistent = (
+    planStart === 1 &&
+    typeof planEnd === 'number' &&
+    Number.isInteger(planEnd) &&
+    planEnd > 0 &&
+    topTotal === planEnd &&
+    (passed + failed + cancelled + skipped + todo === topTotal)
+  );
+  const footerValid = Boolean(footerAllPresent && footerSumConsistent && planConsistent && diagTests > 0);
+
   return {
     plan_start: planStart,
     plan_end: planEnd,
+    plan_consistent: planConsistent,
+    footer_all_present: footerAllPresent,
+    footer_sum_consistent: footerSumConsistent,
+    footer_valid: footerValid,
     top_level: { total: topTotal, passed, failed, cancelled, skipped, todo },
     diagnostic_totals: {
-      total: diagTests !== null ? diagTests : topTotal,
-      passed: diagPass !== null ? diagPass : passed,
-      failed: diagFail !== null ? diagFail : failed,
-      cancelled: diagCancelled !== null ? diagCancelled : cancelled,
-      skipped: diagSkipped !== null ? diagSkipped : skipped,
-      todo: diagTodo !== null ? diagTodo : todo,
+      total: diagTests,
+      passed: diagPass,
+      failed: diagFail,
+      cancelled: diagCancelled,
+      skipped: diagSkipped,
+      todo: diagTodo,
     },
   };
 }
@@ -290,12 +339,24 @@ async function runE2eWithFreshServer(label, scriptRelPath, dataDirPath, stageBud
     PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH,
   };
 
-  const srvChild = spawn(process.execPath, ['src/servidor.mjs'], {
-    cwd: '/product',
-    env: serverEnv,
-    detached: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  let srvChild = null;
+  let srvSpawnError = null;
+  try {
+    srvChild = spawn(process.execPath, ['src/servidor.mjs'], {
+      cwd: '/product',
+      env: serverEnv,
+      detached: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (err) {
+    srvSpawnError = String(err && err.message ? err.message : err);
+  }
+
+  if (srvChild) {
+    srvChild.on('error', (err) => {
+      srvSpawnError = String(err && err.message ? err.message : err);
+    });
+  }
 
   const srvOutChunks = [];
   const srvErrChunks = [];
@@ -303,40 +364,54 @@ async function runE2eWithFreshServer(label, scriptRelPath, dataDirPath, stageBud
   let srvErrBytes = 0;
   let srvTruncated = false;
 
-  srvChild.stdout.on('data', (c) => {
-    if (srvOutBytes + c.length > MAX_STREAM_BYTES || totalCapturedLogBytes + c.length > MAX_TOTAL_BYTES - JSON_RESERVE_BYTES) {
-      srvTruncated = true;
-      return;
-    }
-    srvOutBytes += c.length;
-    totalCapturedLogBytes += c.length;
-    srvOutChunks.push(c);
-  });
-  srvChild.stderr.on('data', (c) => {
-    if (srvErrBytes + c.length > MAX_STREAM_BYTES || totalCapturedLogBytes + c.length > MAX_TOTAL_BYTES - JSON_RESERVE_BYTES) {
-      srvTruncated = true;
-      return;
-    }
-    srvErrBytes += c.length;
-    totalCapturedLogBytes += c.length;
-    srvErrChunks.push(c);
-  });
+  if (srvChild && srvChild.stdout) {
+    srvChild.stdout.on('data', (c) => {
+      if (srvOutBytes + c.length > MAX_STREAM_BYTES || totalCapturedLogBytes + c.length > MAX_TOTAL_BYTES - JSON_RESERVE_BYTES) {
+        srvTruncated = true;
+        return;
+      }
+      srvOutBytes += c.length;
+      totalCapturedLogBytes += c.length;
+      srvOutChunks.push(c);
+    });
+  }
+  if (srvChild && srvChild.stderr) {
+    srvChild.stderr.on('data', (c) => {
+      if (srvErrBytes + c.length > MAX_STREAM_BYTES || totalCapturedLogBytes + c.length > MAX_TOTAL_BYTES - JSON_RESERVE_BYTES) {
+        srvTruncated = true;
+        return;
+      }
+      srvErrBytes += c.length;
+      totalCapturedLogBytes += c.length;
+      srvErrChunks.push(c);
+    });
+  }
 
   let srvExitCode = null;
   let srvSignal = null;
+  let srvClosed = !srvChild;
   const srvClosedPromise = new Promise((res) => {
+    if (!srvChild) {
+      res();
+      return;
+    }
     srvChild.on('close', (code, sig) => {
-      srvExitCode = code;
+      srvClosed = true;
+      srvExitCode = typeof code === 'number' ? code : null;
       srvSignal = sig || null;
       res();
     });
   });
 
   let readiness = null;
+  let readinessError = null;
   let testResult = null;
   try {
+    if (srvSpawnError || !srvChild) {
+      throw new Error(`Fixture server spawn failed: ${srvSpawnError || 'no child'}`);
+    }
     readiness = await waitHttpReady(`${baseUrl}/`, 10000);
-    if (srvExitCode !== null) {
+    if (srvClosed || srvExitCode !== null || srvSignal !== null) {
       throw new Error(`Fixture server exited prematurely with code ${srvExitCode}`);
     }
     const elapsed = Date.now() - stageStart;
@@ -347,13 +422,35 @@ async function runE2eWithFreshServer(label, scriptRelPath, dataDirPath, stageBud
       [scriptRelPath],
       { cwd: '/product', env: serverEnv, timeoutMs: remainingForTestMs }
     );
+  } catch (err) {
+    readinessError = String(err && err.message ? err.message : err);
   } finally {
-    if (srvExitCode === null) {
+    if (srvChild && !srvClosed) {
       killProcessGroup(srvChild.pid, 'SIGTERM');
       const stopTimer = setTimeout(() => killProcessGroup(srvChild.pid, 'SIGKILL'), 4000);
       await srvClosedPromise;
       clearTimeout(stopTimer);
     }
+  }
+
+  if (!testResult) {
+    const emptyBuf = Buffer.alloc(0);
+    const outMeta = writeEvidenceFile(`${label}.stdout.log`, emptyBuf);
+    const errMeta = writeEvidenceFile(`${label}.stderr.log`, emptyBuf);
+    testResult = {
+      label,
+      not_started: true,
+      spawn_error: readinessError,
+      exit_code: null,
+      signal: null,
+      timed_out: false,
+      truncated: false,
+      duration_ms: 0,
+      stdout: '',
+      stderr: '',
+      stdout_meta: outMeta,
+      stderr_meta: errMeta,
+    };
   }
 
   const srvOutBuf = Buffer.concat(srvOutChunks);
@@ -367,10 +464,12 @@ async function runE2eWithFreshServer(label, scriptRelPath, dataDirPath, stageBud
     data_dir: dataDirPath,
     duration_ms: Date.now() - stageStart,
     readiness,
+    readiness_error: readinessError,
     server: {
+      spawn_error: srvSpawnError,
       exit_code: srvExitCode,
       signal: srvSignal,
-      clean_sigterm_exit_0: srvExitCode === 0 && srvSignal === null,
+      clean_sigterm_exit_0: srvSpawnError === null && srvExitCode === 0 && srvSignal === null,
       truncated: srvTruncated,
       stdout_meta: srvOutMeta,
       stderr_meta: srvErrMeta,
@@ -485,19 +584,35 @@ async function runE2eWithFreshServer(label, scriptRelPath, dataDirPath, stageBud
       throw new Error(`Expected exactly 11 unit test files, discovered ${unitFiles.length}`);
     }
 
+    const unitEnv = {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      TMPDIR: process.env.TMPDIR,
+      LANG: process.env.LANG || 'C.UTF-8',
+    };
+
     const unitRun = await runSubprocess(
       'unit-tap',
       process.execPath,
       ['--test', '--test-reporter=tap', ...unitFiles],
-      { cwd: '/product', env: process.env, timeoutMs: Number(PINS.budgets.unit_seconds) * 1000 }
+      { cwd: '/product', env: unitEnv, timeoutMs: Number(PINS.budgets.unit_seconds) * 1000 }
     );
     const tapParsed = parseTapOutput(unitRun.stdout);
     const dt = tapParsed.diagnostic_totals;
+    const tl = tapParsed.top_level;
     const unitOk = (
+      !unitRun.not_started &&
+      unitRun.spawn_error === null &&
       unitRun.exit_code === 0 &&
       unitRun.signal === null &&
       !unitRun.timed_out &&
       !unitRun.truncated &&
+      tapParsed.footer_valid === true &&
+      tl.passed > 0 &&
+      tl.failed === 0 &&
+      tl.cancelled === 0 &&
+      tl.skipped === 0 &&
+      tl.todo === 0 &&
       dt.passed > 0 &&
       dt.failed === 0 &&
       dt.cancelled === 0 &&
@@ -509,6 +624,9 @@ async function runE2eWithFreshServer(label, scriptRelPath, dataDirPath, stageBud
       ok: unitOk,
       discovered_files_count: unitFiles.length,
       discovered_files: unitFiles,
+      env_keys_passed: Object.keys(unitEnv).sort(),
+      not_started: unitRun.not_started,
+      spawn_error: unitRun.spawn_error,
       exit_code: unitRun.exit_code,
       signal: unitRun.signal,
       timed_out: unitRun.timed_out,
@@ -533,37 +651,55 @@ async function runE2eWithFreshServer(label, scriptRelPath, dataDirPath, stageBud
       '/tmp/cg-data-c3a',
       Number(PINS.budgets.e2e_C3a_seconds)
     );
-    let c3aJson = null;
-    const c3aTrimmed = c3aRun.test.stdout.trim();
-    if (c3aTrimmed) {
-      const lastLine = c3aTrimmed.split(/\r?\n/).pop();
-      c3aJson = JSON.parse(lastLine);
-    }
-    const c3aOk = Boolean(
-      c3aRun.test.exit_code === 0 &&
-      c3aRun.test.signal === null &&
-      !c3aRun.test.timed_out &&
-      !c3aRun.test.truncated &&
-      c3aRun.server.clean_sigterm_exit_0 &&
-      !c3aRun.server.truncated &&
-      c3aJson &&
-      c3aJson.ok === true &&
-      Array.isArray(c3aJson.falhas) &&
-      c3aJson.falhas.length === 0
-    );
     summary.e2e_c3a = {
-      ok: c3aOk,
+      ok: false,
+      not_started: c3aRun.test.not_started,
+      spawn_error: c3aRun.test.spawn_error,
       exit_code: c3aRun.test.exit_code,
       signal: c3aRun.test.signal,
       timed_out: c3aRun.test.timed_out,
       truncated: c3aRun.test.truncated,
       duration_ms: c3aRun.duration_ms,
       readiness: c3aRun.readiness,
+      readiness_error: c3aRun.readiness_error,
       server: c3aRun.server,
-      parsed_json: c3aJson,
+      parsed_json: null,
+      parse_error: null,
       stdout_meta: c3aRun.test.stdout_meta,
       stderr_meta: c3aRun.test.stderr_meta,
     };
+    let c3aJson = null;
+    let c3aParseError = null;
+    const c3aTrimmed = c3aRun.test.stdout.trim();
+    if (!c3aTrimmed) {
+      c3aParseError = 'Empty stdout from c3a E2E script';
+    } else {
+      try {
+        const lastLine = c3aTrimmed.split(/\r?\n/).pop();
+        c3aJson = JSON.parse(lastLine);
+      } catch (pErr) {
+        c3aParseError = String(pErr && pErr.message ? pErr.message : pErr);
+      }
+    }
+    const c3aOk = Boolean(
+      !c3aRun.test.not_started &&
+      c3aRun.test.spawn_error === null &&
+      c3aRun.readiness_error === null &&
+      c3aRun.test.exit_code === 0 &&
+      c3aRun.test.signal === null &&
+      !c3aRun.test.timed_out &&
+      !c3aRun.test.truncated &&
+      c3aRun.server.clean_sigterm_exit_0 &&
+      !c3aRun.server.truncated &&
+      c3aParseError === null &&
+      c3aJson &&
+      c3aJson.ok === true &&
+      Array.isArray(c3aJson.falhas) &&
+      c3aJson.falhas.length === 0
+    );
+    summary.e2e_c3a.ok = c3aOk;
+    summary.e2e_c3a.parsed_json = c3aJson;
+    summary.e2e_c3a.parse_error = c3aParseError;
     if (!c3aOk) {
       throw new Error(`E2E C3a failed (rc=${c3aRun.test.exit_code}, server_clean=${c3aRun.server.clean_sigterm_exit_0})`);
     }
@@ -579,10 +715,39 @@ async function runE2eWithFreshServer(label, scriptRelPath, dataDirPath, stageBud
       '/tmp/cg-data-u1',
       Number(PINS.budgets.e2e_U1_seconds)
     );
-    const u1Json = JSON.parse(u1Run.test.stdout.trim());
+    summary.e2e_u1 = {
+      ok: false,
+      not_started: u1Run.test.not_started,
+      spawn_error: u1Run.test.spawn_error,
+      exit_code: u1Run.test.exit_code,
+      signal: u1Run.test.signal,
+      timed_out: u1Run.test.timed_out,
+      truncated: u1Run.test.truncated,
+      duration_ms: u1Run.duration_ms,
+      readiness: u1Run.readiness,
+      readiness_error: u1Run.readiness_error,
+      server: u1Run.server,
+      parsed_json: null,
+      parse_error: null,
+      stdout_meta: u1Run.test.stdout_meta,
+      stderr_meta: u1Run.test.stderr_meta,
+    };
+    let u1Json = null;
+    let u1ParseError = null;
+    const u1Trimmed = u1Run.test.stdout.trim();
+    if (!u1Trimmed) {
+      u1ParseError = 'Empty stdout from u1 E2E script';
+    } else {
+      try {
+        u1Json = JSON.parse(u1Trimmed);
+      } catch (pErr) {
+        u1ParseError = String(pErr && pErr.message ? pErr.message : pErr);
+      }
+    }
     const expectedScenarios = ['U1-01', 'U1-02', 'U1-03', 'U1-04', 'U1-05', 'U1-06', 'U1-07'];
     const observedScenarios = u1Json && u1Json.resultado ? Object.keys(u1Json.resultado) : [];
     const exactSevenMatch = (
+      u1ParseError === null &&
       observedScenarios.length === expectedScenarios.length &&
       expectedScenarios.every((k, idx) => observedScenarios[idx] === k) &&
       expectedScenarios.every((k) => {
@@ -591,29 +756,23 @@ async function runE2eWithFreshServer(label, scriptRelPath, dataDirPath, stageBud
       })
     );
     const u1Ok = Boolean(
+      !u1Run.test.not_started &&
+      u1Run.test.spawn_error === null &&
+      u1Run.readiness_error === null &&
       u1Run.test.exit_code === 0 &&
       u1Run.test.signal === null &&
       !u1Run.test.timed_out &&
       !u1Run.test.truncated &&
       u1Run.server.clean_sigterm_exit_0 &&
       !u1Run.server.truncated &&
+      u1ParseError === null &&
       u1Json &&
       u1Json.ok === true &&
       exactSevenMatch
     );
-    summary.e2e_u1 = {
-      ok: u1Ok,
-      exit_code: u1Run.test.exit_code,
-      signal: u1Run.test.signal,
-      timed_out: u1Run.test.timed_out,
-      truncated: u1Run.test.truncated,
-      duration_ms: u1Run.duration_ms,
-      readiness: u1Run.readiness,
-      server: u1Run.server,
-      parsed_json: u1Json,
-      stdout_meta: u1Run.test.stdout_meta,
-      stderr_meta: u1Run.test.stderr_meta,
-    };
+    summary.e2e_u1.ok = u1Ok;
+    summary.e2e_u1.parsed_json = u1Json;
+    summary.e2e_u1.parse_error = u1ParseError;
     if (!u1Ok) {
       throw new Error(`E2E U1 failed (rc=${u1Run.test.exit_code}, exactSevenMatch=${exactSevenMatch})`);
     }
