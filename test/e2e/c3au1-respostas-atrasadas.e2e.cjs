@@ -11,7 +11,14 @@ const resultado = {};
 async function cenario(b, nome, corpo) {
   const ctx = await b.newContext({ viewport: { width: 1280, height: 900 } });
   const pg = await ctx.newPage();
-  const falhas = []; const posts = []; const erros = [];
+  const falhas = []; const posts = []; const erros = []; const retidos = [];
+  const comPrazo = (promessa, rotulo, ms = 15000) => new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`timeout (${ms}ms): ${rotulo}`)), ms);
+    promessa.then(
+      (v) => { clearTimeout(t); resolve(v); },
+      (e) => { clearTimeout(t); reject(e); }
+    );
+  });
   pg.on('pageerror', (e) => erros.push(String(e)));
   pg.on('console', (m) => { if (m.type() === 'error') erros.push(m.text()); });
   pg.on('request', (r) => { if (r.method() === 'POST') posts.push(new URL(r.url()).pathname); });
@@ -23,10 +30,69 @@ async function cenario(b, nome, corpo) {
     /** Read-only server state, outside the page logic (same session cookie). */
     servidor: async (id) => (await pg.request.get(`${BASE}/api/pedidos/${encodeURIComponent(id)}`)).json(),
     async novo() {
+      const idAntes = await h.hash();
       const [resp] = await Promise.all([pg.waitForResponse((r) => r.request().method() === 'POST' && new URL(r.url()).pathname === '/api/pedidos'), pg.click('#novo')]);
+      if (!resp.ok()) throw new Error(`POST /api/pedidos HTTP ${resp.status()}`);
       const p = await resp.json();
-      await pg.waitForFunction((oid) => document.getElementById('ordem').textContent.includes(oid), p.order_id);
+      if (!p || typeof p.id !== 'string' || !p.id || typeof p.order_id !== 'string' || !p.order_id) {
+        throw new Error('POST /api/pedidos invalid body');
+      }
+      if (p.id === idAntes) throw new Error(`POST /api/pedidos returned unchanged order id ${p.id}`);
+      await pg.waitForFunction(
+        ({ idEsperado, oidEsperado }) => decodeURIComponent(location.hash.slice(1)) === idEsperado && (document.getElementById('ordem')?.textContent || '').includes(oidEsperado),
+        { idEsperado: p.id, oidEsperado: p.order_id }
+      );
       return p;
+    },
+    async abrirHash(idEsperado) {
+      const alvoPath = `/api/pedidos/${encodeURIComponent(idEsperado)}`;
+      const [resp] = await Promise.all([
+        pg.waitForResponse((r) => r.request().method() === 'GET' && new URL(r.url()).pathname === alvoPath),
+        pg.evaluate((id) => { location.hash = id; }, idEsperado),
+      ]);
+      if (!resp.ok()) throw new Error(`GET ${alvoPath} HTTP ${resp.status()}`);
+      const p = await resp.json();
+      if (!p || p.id !== idEsperado || typeof p.order_id !== 'string' || !p.order_id) {
+        throw new Error(`GET ${alvoPath} invalid body`);
+      }
+      await pg.waitForFunction(
+        ({ id, oid }) => decodeURIComponent(location.hash.slice(1)) === id && (document.getElementById('ordem')?.textContent || '').includes(oid),
+        { id: p.id, oid: p.order_id }
+      );
+      return p;
+    },
+    async recarregar(idEsperado) {
+      const alvoPath = `/api/pedidos/${encodeURIComponent(idEsperado)}`;
+      const [resp] = await Promise.all([
+        pg.waitForResponse((r) => r.request().method() === 'GET' && new URL(r.url()).pathname === alvoPath),
+        pg.reload(),
+      ]);
+      if (!resp.ok()) throw new Error(`reload GET ${alvoPath} HTTP ${resp.status()}`);
+      const p = await resp.json();
+      if (!p || p.id !== idEsperado || typeof p.order_id !== 'string' || !p.order_id) {
+        throw new Error(`reload GET ${alvoPath} invalid body`);
+      }
+      await pg.waitForFunction(
+        ({ id, oid }) => decodeURIComponent(location.hash.slice(1)) === id && (document.getElementById('ordem')?.textContent || '').includes(oid),
+        { id: p.id, oid: p.order_id }
+      );
+      return p;
+    },
+    async vigiarSemMutacao() {
+      await pg.evaluate(() => {
+        if (window.__u1Obs) window.__u1Obs.disconnect();
+        window.__u1Mutacoes = 0;
+        const obs = new MutationObserver((lista) => { window.__u1Mutacoes += lista.length; });
+        for (const id of ['ordem', 'estado', 'trilha', 'relatorio', 'pedidoTxt']) {
+          const el = document.getElementById(id);
+          if (el) obs.observe(el, { childList: true, characterData: true, subtree: true });
+        }
+        window.__u1Obs = obs;
+      });
+      return () => pg.evaluate(() => {
+        if (window.__u1Obs) { window.__u1Obs.disconnect(); delete window.__u1Obs; }
+        return window.__u1Mutacoes || 0;
+      });
     },
     async acao(botao, sufixo) {
       await Promise.all([pg.waitForResponse((r) => r.request().method() === 'POST' && new URL(r.url()).pathname.endsWith(sufixo)), pg.click(botao)]);
@@ -39,28 +105,93 @@ async function cenario(b, nome, corpo) {
      * is held. Otherwise the request never reaches the server and is answered with an error carrying that text.
      */
     async segurar(filtro, modo = 'servidor') {
-      let soltar, chegou, resposta;
-      const liberado = new Promise((r) => { soltar = r; }); const chegada = new Promise((r) => { chegou = r; });
+      let abrirLiberado, chegouOk, chegouErro, fimOk, fimErro, resposta, corpoJson;
+      let reivindicado = false, solto = false, desregistrado = false, rotaCapturada = null;
+      const liberado = new Promise((r) => { abrirLiberado = r; });
+      const chegadaBruta = new Promise((res, rej) => { chegouOk = res; chegouErro = rej; });
+      const concluidoBruto = new Promise((res, rej) => { fimOk = res; fimErro = rej; });
+      chegadaBruta.catch(() => {});
+      concluidoBruto.catch(() => {});
       const handler = async (route) => {
-        if (!filtro(route.request())) return route.fallback();
-        await pg.unroute('**/api/**', handler);
-        if (modo === 'servidor') {
-          resposta = await route.fetch(); chegou(); await liberado;
-          await route.fulfill({ response: resposta });
-        } else {
-          chegou(); await liberado;
-          await route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ erro: modo }) });
+        if (reivindicado || !filtro(route.request())) return route.fallback();
+        reivindicado = true;
+        rotaCapturada = route;
+        try {
+          if (modo === 'servidor') {
+            resposta = await route.fetch();
+            const st = resposta.status();
+            if (st < 200 || st >= 300) throw new Error(`unexpected held HTTP ${st} for ${route.request().url()}`);
+            corpoJson = await resposta.json();
+            chegouOk();
+            await liberado;
+            await route.fulfill({ response: resposta });
+          } else {
+            chegouOk();
+            await liberado;
+            await route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ erro: modo }) });
+          }
+          fimOk();
+        } catch (e) {
+          chegouErro(e);
+          fimErro(e);
         }
       };
+      const removerRota = async () => {
+        if (!desregistrado) {
+          desregistrado = true;
+          await pg.unroute('**/api/**', handler);
+        }
+      };
+      const item = {
+         get solto() { return solto; },
+        encerrarForcado: async () => {
+          if (!solto) {
+            falhas.push(`unreleased hold in ${nome} (${modo})`);
+            solto = true;
+            if (!reivindicado) {
+              chegouErro(new Error('hold never matched any request'));
+              fimOk();
+            } else {
+              abrirLiberado();
+            }
+          }
+          try {
+            if (reivindicado) await comPrazo(concluidoBruto, `hold cleanup ${nome}`, 5000);
+          } catch (e) {
+            falhas.push(`hold error in ${nome}: ${e && e.message || e}`);
+            if (rotaCapturada) await rotaCapturada.abort().catch(() => {});
+          } finally {
+            await removerRota().catch(() => {});
+          }
+        },
+      };
+      retidos.push(item);
       await pg.route('**/api/**', handler);
-      return { chegada, soltar: async () => { soltar(); await h.assentar(); }, json: async () => resposta.json() };
+      return {
+        get chegada() { return comPrazo(chegadaBruta, `hold arrival (${modo})`); },
+        soltar: async () => {
+          solto = true;
+          abrirLiberado();
+          try {
+            await comPrazo(concluidoBruto, `hold completion (${modo})`);
+          } finally {
+            await removerRota();
+          }
+          await h.assentar();
+        },
+        json: async () => structuredClone(corpoJson),
+      };
     },
   };
   const caminho = (fim) => (r) => r.method() === 'POST' && new URL(r.url()).pathname.endsWith(fim);
   try {
     await pg.goto(`${BASE}/`);
     await corpo(h, caminho);
-  } catch (e) { falhas.push(`exception: ${e && e.stack || e}`); }
+  } catch (e) {
+    falhas.push(`exception: ${e && e.stack || e}`);
+  } finally {
+    for (const r of retidos) await r.encerrarForcado();
+  }
   if (erros.length) falhas.push(`browser errors: ${erros.join(' | ')}`);
   resultado[nome] = { ok: falhas.length === 0, falhas, posts };
   await ctx.close();
@@ -76,7 +207,9 @@ async function cenario(b, nome, corpo) {
     await h.pg.click('#montarPedido'); await build.chegada;
     const B = await h.novo();
     const antes = h.posts.length;
+    const lerMutacoes = await h.vigiarSemMutacao();
     await build.soltar();
+    h.conferir(await lerMutacoes() === 0, 'late A build mutated the rendered view of B');
     h.conferir(await h.hash() === B.id, 'hash moved away from B');
     h.conferir((await h.texto('#ordem')).includes(B.order_id), 'view is not B');
     h.conferir(await h.texto('#pedidoTxt') === '', 'A request text appeared on B');
@@ -91,10 +224,13 @@ async function cenario(b, nome, corpo) {
     await h.pg.click('#novo'); await novoA.chegada;
     const B = await h.novo();
     const A = await novoA.json();
+    const lerMutacoes = await h.vigiarSemMutacao();
     await novoA.soltar();
+    const mutacoes = await lerMutacoes();
+    h.conferir(A.id !== B.id, 'A and B received the same local id');
     h.conferir(await h.hash() === B.id, 'late New A changed the hash');
     const ordem = await h.texto('#ordem');
-    h.conferir(ordem.includes(B.order_id) && !ordem.includes(A.order_id), 'late New A rendered');
+    h.conferir(ordem.includes(B.order_id) && mutacoes === 0, 'late New A rendered');
     h.conferir((await h.texto('#avisos')).includes(`not opened: order ${A.id}`), 'late order not listed as not opened');
     h.conferir(h.posts.length === 2, `unexpected POSTs ${h.posts}`);
   });
@@ -109,12 +245,10 @@ async function cenario(b, nome, corpo) {
     h.conferir(await h.html('#erro') === '', 'stale A error shown on B');
     h.conferir((await h.texto('#ordem')).includes(B.order_id), 'B view replaced');
     // b) Navigate to A by address, start a failing action, navigate back to B, then the failure arrives.
-    await h.pg.evaluate((id) => { location.hash = id; }, A.id);
-    await h.pg.waitForFunction((oid) => document.getElementById('ordem').textContent.includes(oid), A.order_id);
+    await h.abrirHash(A.id);
     falha = await h.segurar(caminho('/sugerir'), 'STALE-A-FAILURE-2');
     await h.pg.click('#sugerir'); await falha.chegada;
-    await h.pg.evaluate((id) => { location.hash = id; }, B.id);
-    await h.pg.waitForFunction((oid) => document.getElementById('ordem').textContent.includes(oid), B.order_id);
+    await h.abrirHash(B.id);
     await falha.soltar();
     h.conferir(await h.html('#erro') === '', 'stale A error shown after navigating back to B');
     h.conferir((await h.texto('#ordem')).includes(B.order_id), 'B view replaced after navigation');
@@ -163,7 +297,7 @@ async function cenario(b, nome, corpo) {
       h.conferir(h.posts.filter((p) => p === `/api/pedidos/${A.id}/capturar`).length === 1, `${primeiro}: capture re-sent`);
       h.conferir(!h.posts.some((p) => p.endsWith('/reconciliar') || p.endsWith('/anular') || p.endsWith('/reautorizar')), `${primeiro}: an automatic financial POST was sent`);
       // A read-only reload shows the server state and clears the notice.
-      await h.pg.reload(); await h.pg.waitForFunction((oid) => document.getElementById('ordem').textContent.includes(oid), A.order_id);
+      await h.recarregar(A.id);
       h.conferir(!/discarded/.test(await h.texto('#avisos')), `${primeiro}: notice survives a reload`);
       h.conferir((await h.texto('#estado')).includes(srv.estado), `${primeiro}: reloaded state differs from the server`);
     }
