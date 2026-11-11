@@ -1,4 +1,4 @@
-name: Qualify PayPal Catalog Gate Offline
+name: Record Catalog Gate qualified demo
 
 on:
   workflow_dispatch:
@@ -7,43 +7,53 @@ permissions:
   contents: read
 
 concurrency:
-  group: paypal-catalog-gate-offline-${{ github.ref }}
+  group: paypal-catalog-gate-video-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  qualify-offline:
+  record-video:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - name: Checkout repository
+      - name: Checkout reviewed candidate
         timeout-minutes: 2
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
           fetch-depth: 0
 
-      - name: Run offline qualification harness
+      - name: Record fixture and reviewed stored evidence
         timeout-minutes: 11
-        env:
-          GITHUB_ACTIONS: "true"
-          GITHUB_RUN_ID: ${{ github.run_id }}
-          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
-          GITHUB_SHA: ${{ github.sha }}
-        run: |
-          python3 -B .ci/qualify.py
+        run: python3 -I -B .demo/video.py
 
-      - name: Reconcile and remove job container
+      - name: Close only this job's immutable owned container
         if: always()
-        timeout-minutes: 1
-        env:
-          GITHUB_RUN_ID: ${{ github.run_id }}
-          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+        timeout-minutes: 2
         run: |
-          set -eu
-          case "${GITHUB_RUN_ID:-}" in (''|*[!0-9]*) exit 1 ;; esac
-          case "${GITHUB_RUN_ATTEMPT:-}" in (''|*[!0-9]*) exit 1 ;; esac
-          CNAME="cg-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          IDS="$(docker ps -aq --filter "name=^/${CNAME}$" --filter "label=cg.run=${CNAME}" || true)"
-          if [ -n "${IDS}" ]; then
-            docker rm -f "${CNAME}" >/dev/null 2>&1 || true
-          fi
+          python3 -I -B - <<'PY'
+          import json,os,re,subprocess,sys
+          run=os.environ.get('GITHUB_RUN_ID','');attempt=os.environ.get('GITHUB_RUN_ATTEMPT','')
+          if not re.fullmatch('[0-9]+',run) or not re.fullmatch('[0-9]+',attempt):sys.exit(1)
+          name='cg-video-'+run+'-'+attempt
+          def call(args,timeout=15):return subprocess.run(args,capture_output=True,text=True,timeout=timeout,check=False)
+          found=call(['docker','ps','-aq','--no-trunc','--filter','name=^/'+name+'$'])
+          if found.returncode:sys.exit(1)
+          ids=found.stdout.split()
+          if not ids:sys.exit(0)
+          if len(ids)!=1 or not re.fullmatch('[a-f0-9]{64}',ids[0]):sys.exit(1)
+          image='mcr.microsoft.com/playwright@sha256:ee15712262f017b8157421b212b12099146645f44b1bc5c0514cbbe6a229b1d0'
+          img=call(['docker','image','inspect',image])
+          inspected=call(['docker','inspect',ids[0]])
+          if img.returncode or inspected.returncode:sys.exit(1)
+          expected=json.loads(img.stdout)[0]['Id'];obj=json.loads(inspected.stdout)[0]
+          if obj['Id']!=ids[0] or obj['Name']!='/'+name or obj['Image']!=expected or obj['Config'].get('Labels',{}).get('cg.run')!=name:sys.exit(1)
+          if obj['State']['Running']:
+              if call(['docker','kill',ids[0]]).returncode:sys.exit(1)
+              if call(['docker','wait',ids[0]]).returncode:sys.exit(1)
+          obj=json.loads(call(['docker','inspect',ids[0]]).stdout)[0]
+          if obj['State']['Running'] or obj['State']['Pid']!=0:sys.exit(1)
+          if call(['docker','rm',ids[0]],20).returncode:sys.exit(1)
+          after=call(['docker','ps','-aq','--no-trunc','--filter','name=^/'+name+'$'])
+          if after.returncode or after.stdout.strip():sys.exit(1)
+          print('Owned video container closed; this cleanup does not qualify failed media.')
+          PY

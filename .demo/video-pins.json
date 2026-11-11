@@ -1,0 +1,12 @@
+{
+  "schema": "catalog-gate-video-v1",
+  "product": "e7955eda8e9413224a6b7541be40e5ede4638a57",
+  "baseline": "8f4739cda6f8b368f179bf2e2f797826fda94a46",
+  "files": {
+    "video.py": "c5c5c419b20954f9fe720898c35c7089b42b273f65f055a0a98952040bf8d3ff",
+    "record.mjs": "99ded26d499f15698ec07b22075ef40cd7cc7d0b6526881220652a05db4ec0b0",
+    "evidence.json": "b7ea5f0b9085601a6752101e5babab2d59aec43fe560f88009c2d9261f05217f"
+  },
+  "ai_answer_sha256": "7741aaa34348bd540f5551771c528a189bafd0efde1cb70e67974c28d3b85450",
+  "workflow_sha256": "7a3d64664be83dc096e495109ab57cf35c6fb4ac2feab8f569d4007fea694909"
+}
