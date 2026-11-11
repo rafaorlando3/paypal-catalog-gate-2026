@@ -1155,6 +1155,12 @@ def main() -> int:
             report["cleanup"]["workspace_removed"] = not workspace_dir.exists()
         workspace_dir = None
 
+        remaining(s7_deadline)
+        audit_elapsed = time.monotonic() - s7_start
+        if audit_elapsed > audit_seconds:
+            raise DeadlineExpiredError(f"Post-audit + evidence + cleanup exceeded budget: {audit_elapsed:.6f}s > {audit_seconds}s")
+        report["stages"]["post_audit"]["duration_seconds"] = round(audit_elapsed, 6)
+
         elapsed = time.monotonic() - t0
         if not (0.0 < elapsed <= total_seconds):
             raise DeadlineExpiredError(f"Total elapsed {elapsed:.6f}s outside valid budget (0, {total_seconds}]")
