@@ -22,6 +22,20 @@ ALLOWED_OVERLAY_PATHS = {
     ".ci/README.md",
 }
 
+ALLOWED_EVIDENCE_FILES = (
+    "unit-tap.stdout.log",
+    "unit-tap.stderr.log",
+    "e2e-c3a-server.stdout.log",
+    "e2e-c3a-server.stderr.log",
+    "e2e-c3a.stdout.log",
+    "e2e-c3a.stderr.log",
+    "e2e-u1-server.stdout.log",
+    "e2e-u1-server.stderr.log",
+    "e2e-u1.stdout.log",
+    "e2e-u1.stderr.log",
+    "inside-summary.json",
+)
+
 FORBIDDEN_ENV_KEYS = (
     "GEMINI_API_KEY",
     "PAYPAL_CLIENT_ID",
@@ -258,6 +272,71 @@ def emit_framed_report(report: dict) -> None:
     sys.stdout.flush()
 
 
+def emit_evidence_files(evidence_dir: Path, max_file_bytes: int, max_total_bytes: int, require_all: bool) -> dict:
+    emitted = []
+    errors = []
+    total_bytes = 0
+    try:
+        if not evidence_dir or not evidence_dir.is_dir():
+            if require_all:
+                errors.append("Evidence directory missing")
+            return {"ok": len(errors) == 0, "total_bytes": 0, "emitted": emitted, "errors": errors}
+
+        for entry in sorted(os.listdir(evidence_dir)):
+            if entry not in ALLOWED_EVIDENCE_FILES:
+                errors.append(f"Unexpected file in evidence_dir: {entry}")
+
+        for fname in ALLOWED_EVIDENCE_FILES:
+            fpath = evidence_dir / fname
+            try:
+                st = os.lstat(fpath)
+            except FileNotFoundError:
+                if require_all:
+                    errors.append(f"Required evidence file missing: {fname}")
+                continue
+            except Exception as exc:
+                errors.append(f"lstat error on {fname}: {exc}")
+                continue
+
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+                errors.append(f"Non-regular evidence file: {fname}")
+                continue
+            try:
+                raw = fpath.read_bytes()
+            except Exception as exc:
+                errors.append(f"Read error on {fname}: {exc}")
+                continue
+
+            size = len(raw)
+            if size > max_file_bytes:
+                errors.append(f"Evidence file {fname} exceeds max_file_bytes ({size} > {max_file_bytes})")
+                continue
+            if total_bytes + size > max_total_bytes:
+                errors.append(f"Evidence total exceeds max_total_bytes ({total_bytes + size} > {max_total_bytes})")
+                continue
+
+            total_bytes += size
+            f_sha256 = sha256_bytes(raw)
+            payload = {
+                "file": fname,
+                "bytes": size,
+                "sha256": f_sha256,
+                "encoding": "base64",
+                "data": base64.b64encode(raw).decode("ascii"),
+            }
+            raw_json = json.dumps(payload, sort_keys=True, ensure_ascii=True).encode("utf-8")
+            frame_sha = sha256_bytes(raw_json)
+            sys.stdout.write(f"===BEGIN_PAYPAL230_EVIDENCE_FILE:{fname}:SHA256:{frame_sha}===\n")
+            sys.stdout.write(raw_json.decode("utf-8") + "\n")
+            sys.stdout.write(f"===END_PAYPAL230_EVIDENCE_FILE:{fname}:SHA256:{frame_sha}===\n")
+            sys.stdout.flush()
+            emitted.append({"file": fname, "bytes": size, "sha256": f_sha256, "frame_sha256": frame_sha})
+    except Exception as exc:
+        errors.append(f"Unhandled evidence emission error: {exc}")
+
+    return {"ok": len(errors) == 0, "total_bytes": total_bytes, "emitted": emitted, "errors": errors}
+
+
 def main() -> int:
     t0 = time.monotonic()
     started_utc = utc_now()
@@ -303,6 +382,8 @@ def main() -> int:
     total_deadline = t0 + float(budgets["total_seconds"])
     reserve_seconds = float(budgets["closure_reserve_seconds"])
     execution_deadline = total_deadline - reserve_seconds
+    max_file_bytes = int(pins["evidence"]["max_file_bytes"])
+    max_total_bytes = int(pins["evidence"]["max_total_bytes"])
 
     workspace_dir = None
     container_created = False
@@ -323,6 +404,9 @@ def main() -> int:
             raise RuntimeError(f"pins.json files length ({len(exp_files)}) != blobs ({exp_blobs_count})")
 
         head_sha = run_cmd(["git", "rev-parse", "HEAD"], cwd=repo_root, timeout=10).stdout.strip()
+        github_sha = os.environ.get("GITHUB_SHA", "").strip()
+        if not re.fullmatch(r"[0-9a-f]{40}", github_sha) or head_sha != github_sha:
+            raise RuntimeError(f"HEAD ({head_sha}) != GITHUB_SHA ({github_sha})")
         tree_of_commit = run_cmd(["git", "rev-parse", f"{exp_commit}^{{tree}}"], cwd=repo_root, timeout=10).stdout.strip()
         if tree_of_commit != exp_tree:
             raise RuntimeError(f"Commit {exp_commit} tree mismatch: {tree_of_commit} != {exp_tree}")
@@ -347,12 +431,42 @@ def main() -> int:
         if len(ls_entries) != exp_blobs_count:
             raise RuntimeError(f"git ls-tree count {len(ls_entries)} != {exp_blobs_count}")
 
-        # Verify HEAD overlay allowlist against product commit
-        head_ls = run_cmd(["git", "ls-tree", "-r", "--name-only", head_sha], cwd=repo_root, timeout=15).stdout.splitlines()
-        extra_in_head = sorted(set(head_ls) - set(ls_entries.keys()))
-        disallowed_overlay = [p for p in extra_in_head if p not in ALLOWED_OVERLAY_PATHS]
-        if disallowed_overlay:
-            raise RuntimeError(f"Disallowed overlay paths in HEAD: {disallowed_overlay}")
+        # Verify exact 5-file overlay via git diff-tree and match working files to HEAD blobs
+        diff_res = run_cmd(
+            ["git", "diff-tree", "-r", "--no-renames", exp_commit, head_sha],
+            cwd=repo_root,
+            timeout=15,
+        )
+        overlay_blobs = {}
+        for line in diff_res.stdout.splitlines():
+            if not line.strip():
+                continue
+            meta, path_str = line.split("\t", 1)
+            validate_rel_path(path_str)
+            parts = meta.lstrip(":").split()
+            old_mode, new_mode, old_blob, new_blob, status = parts[0], parts[1], parts[2], parts[3], parts[4]
+            if status != "A" or old_mode != "000000" or not set(old_blob) == {"0"}:
+                raise RuntimeError(f"Non-addition or product change in diff-tree for {path_str}: {status}")
+            if new_mode not in ("100644", "100755"):
+                raise RuntimeError(f"Unexpected mode {new_mode} for overlay {path_str}")
+            if path_str not in ALLOWED_OVERLAY_PATHS:
+                raise RuntimeError(f"Disallowed overlay path in diff-tree: {path_str}")
+            overlay_blobs[path_str] = new_blob
+
+        if set(overlay_blobs.keys()) != ALLOWED_OVERLAY_PATHS:
+            raise RuntimeError(
+                f"Overlay paths mismatch: got {sorted(overlay_blobs.keys())}, expected {sorted(ALLOWED_OVERLAY_PATHS)}"
+            )
+        extra_in_head = sorted(overlay_blobs.keys())
+
+        for ov_rel, exp_ov_blob in overlay_blobs.items():
+            ov_fp = repo_root / ov_rel
+            st = os.lstat(ov_fp)
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+                raise RuntimeError(f"Overlay file is not regular: {ov_rel}")
+            ov_raw = ov_fp.read_bytes()
+            if git_blob_sha1(ov_raw) != exp_ov_blob:
+                raise RuntimeError(f"Working overlay file {ov_rel} does not match HEAD blob {exp_ov_blob}")
 
         workspace_dir = Path(tempfile.mkdtemp(prefix=f"{container_name}-"))
         os.chmod(workspace_dir, 0o755)
@@ -461,9 +575,9 @@ def main() -> int:
             "npm_packages": npm_reports,
         }
 
-        # Create single container (never recreate on timeout)
+        # Create single container (collision precheck by NAME only)
         existing = run_cmd(
-            ["docker", "ps", "-aq", "--filter", f"name=^/{container_name}$", "--filter", f"label=cg.run={container_name}"],
+            ["docker", "ps", "-aq", "--filter", f"name=^/{container_name}$"],
             timeout=10,
         ).stdout.strip()
         if existing:
@@ -629,6 +743,11 @@ def main() -> int:
         if not inside_summary or inside_summary.get("ok") is not True:
             raise RuntimeError(f"inside.mjs reported failure: {inside_summary.get('failure_reason') if inside_summary else 'missing summary'}")
 
+        ev_emission = emit_evidence_files(evidence_dir, max_file_bytes, max_total_bytes, require_all=True)
+        report["stages"]["evidence_emission"] = ev_emission
+        if not ev_emission.get("ok"):
+            raise RuntimeError(f"Evidence emission failed: {ev_emission.get('errors')}")
+
         report["ok"] = True
         report["finished_at_utc"] = utc_now()
         report["total_duration_seconds"] = round(time.monotonic() - t0, 3)
@@ -640,13 +759,22 @@ def main() -> int:
         report["failure_reason"] = str(exc)
         report["finished_at_utc"] = utc_now()
         report["total_duration_seconds"] = round(time.monotonic() - t0, 3)
-        if workspace_dir and (workspace_dir / "evidence" / "inside-summary.json").is_file() and not report["stages"].get("inside"):
-            try:
-                report["stages"]["inside"] = json.loads(
-                    (workspace_dir / "evidence" / "inside-summary.json").read_text(encoding="utf-8")
-                )
-            except Exception:
-                pass
+        if workspace_dir:
+            ev_dir = workspace_dir / "evidence"
+            if (ev_dir / "inside-summary.json").is_file() and not report["stages"].get("inside"):
+                try:
+                    report["stages"]["inside"] = json.loads(
+                        (ev_dir / "inside-summary.json").read_text(encoding="utf-8")
+                    )
+                except Exception:
+                    pass
+            if "evidence_emission" not in report["stages"]:
+                try:
+                    report["stages"]["evidence_emission"] = emit_evidence_files(
+                        ev_dir, max_file_bytes, max_total_bytes, require_all=False
+                    )
+                except Exception as ev_exc:
+                    report["stages"]["evidence_emission"] = {"ok": False, "errors": [str(ev_exc)]}
         emit_framed_report(report)
         return 1
     finally:
