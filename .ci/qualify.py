@@ -561,17 +561,27 @@ def main() -> int:
         img_inspect_raw = run_cmd(["docker", "image", "inspect", tc["image"]], timeout=15).stdout
         img_inspect = json.loads(img_inspect_raw)[0]
         repo_digests = img_inspect.get("RepoDigests") or []
+        img_id = img_inspect.get("Id")
+        img_arch = img_inspect.get("Architecture")
+        img_os = img_inspect.get("Os")
+        img_cfg = img_inspect.get("Config") or {}
         if tc["image"] not in repo_digests:
             raise RuntimeError(f"Pulled image RepoDigests {repo_digests} does not contain pinned {tc['image']}")
+        if img_os != "linux" or img_arch != "amd64":
+            raise RuntimeError(f"Pulled image platform mismatch: os={img_os} arch={img_arch}, expected linux/amd64")
+        if not img_id:
+            raise RuntimeError("Pulled image Id is missing")
 
         report["stages"]["toolchain"] = {
             "ok": True,
             "duration_seconds": round(time.monotonic() - s2_start, 3),
             "image": tc["image"],
-            "image_id": img_inspect.get("Id"),
+            "image_id": img_id,
             "repo_digests": repo_digests,
-            "architecture": img_inspect.get("Architecture"),
-            "os": img_inspect.get("Os"),
+            "architecture": img_arch,
+            "os": img_os,
+            "image_config_entrypoint": img_cfg.get("Entrypoint"),
+            "image_config_volumes": img_cfg.get("Volumes"),
             "npm_packages": npm_reports,
         }
 
@@ -628,35 +638,136 @@ def main() -> int:
         container_created = True
 
         pre_inspect = json.loads(run_cmd(["docker", "inspect", container_name], timeout=10).stdout)[0]
-        hc = pre_inspect.get("HostConfig", {})
-        mounts = pre_inspect.get("Mounts", [])
+        hc = pre_inspect.get("HostConfig") or {}
+        ccfg = pre_inspect.get("Config") or {}
+        mounts = pre_inspect.get("Mounts") or []
         mount_summary = [
-            {"Destination": m.get("Destination"), "RW": m.get("RW"), "Type": m.get("Type")}
+            {
+                "Destination": m.get("Destination"),
+                "Source": m.get("Source"),
+                "RW": m.get("RW"),
+                "Type": m.get("Type"),
+            }
             for m in mounts
         ]
+
+        profile_mismatches = []
+        container_image_id = pre_inspect.get("Image")
+        if container_image_id != img_id:
+            profile_mismatches.append(f"Container Image {container_image_id} != pinned image_id {img_id}")
         if hc.get("NetworkMode") != "none":
-            raise RuntimeError(f"Container NetworkMode is {hc.get('NetworkMode')}, expected 'none'")
-        if not hc.get("ReadonlyRootfs"):
-            raise RuntimeError("Container ReadonlyRootfs is not True")
+            profile_mismatches.append(f"NetworkMode={hc.get('NetworkMode')} != 'none'")
+        if hc.get("ReadonlyRootfs") is not True:
+            profile_mismatches.append(f"ReadonlyRootfs={hc.get('ReadonlyRootfs')} != True")
+        if hc.get("Init") is not True:
+            profile_mismatches.append(f"Init={hc.get('Init')} != True")
+        if hc.get("Privileged") is not False:
+            profile_mismatches.append(f"Privileged={hc.get('Privileged')} != False")
+        if hc.get("CapDrop") != ["ALL"]:
+            profile_mismatches.append(f"CapDrop={hc.get('CapDrop')} != ['ALL']")
+        if hc.get("CapAdd") not in (None, []):
+            profile_mismatches.append(f"CapAdd={hc.get('CapAdd')} must be empty/None")
+        sec_opt = hc.get("SecurityOpt") or []
+        if not isinstance(sec_opt, list) or len(sec_opt) != 1 or sec_opt[0] not in ("no-new-privileges", "no-new-privileges:true"):
+            profile_mismatches.append(f"SecurityOpt={sec_opt} invalid")
+        if hc.get("IpcMode") != "private":
+            profile_mismatches.append(f"IpcMode={hc.get('IpcMode')} != 'private'")
+        exp_shm = int(rt["shm_bytes"])
+        if hc.get("ShmSize") != exp_shm:
+            profile_mismatches.append(f"ShmSize={hc.get('ShmSize')} != {exp_shm}")
+        exp_nano_cpus = int(rt["cpus"]) * 1_000_000_000
+        if hc.get("NanoCpus") != exp_nano_cpus:
+            profile_mismatches.append(f"NanoCpus={hc.get('NanoCpus')} != {exp_nano_cpus}")
+        exp_mem = int(rt["memory_bytes"])
+        if hc.get("Memory") != exp_mem:
+            profile_mismatches.append(f"Memory={hc.get('Memory')} != {exp_mem}")
+        exp_pids = int(rt["pids_limit"])
+        if hc.get("PidsLimit") != exp_pids:
+            profile_mismatches.append(f"PidsLimit={hc.get('PidsLimit')} != {exp_pids}")
+        if hc.get("Binds") not in (None, []):
+            profile_mismatches.append(f"HostConfig.Binds={hc.get('Binds')} must be empty/None")
+        if hc.get("Devices") not in (None, []):
+            profile_mismatches.append(f"HostConfig.Devices={hc.get('Devices')} must be empty/None")
+        if ccfg.get("WorkingDir") != "/product":
+            profile_mismatches.append(f"Config.WorkingDir={ccfg.get('WorkingDir')} != '/product'")
+        if ccfg.get("Volumes") not in (None, {}):
+            profile_mismatches.append(f"Config.Volumes={ccfg.get('Volumes')} must be empty/None")
+
+        tmpfs_map = hc.get("Tmpfs") or {}
+        exp_tmpfs_bytes = int(rt["tmpfs_bytes"])
+        if list(tmpfs_map.keys()) != ["/tmp"]:
+            profile_mismatches.append(f"HostConfig.Tmpfs keys={list(tmpfs_map.keys())} != ['/tmp']")
+        else:
+            tmpfs_opts = [tok.strip() for tok in str(tmpfs_map["/tmp"]).split(",") if tok.strip()]
+            allowed_size_tokens = {f"size={exp_tmpfs_bytes}", "size=1048576k", "size=1024m", "size=1g"}
+            allowed_mode_tokens = {"mode=1777", f"mode={0o1777}"}
+            has_rw = "rw" in tmpfs_opts
+            has_nosuid = "nosuid" in tmpfs_opts
+            size_matches = [t for t in tmpfs_opts if t in allowed_size_tokens]
+            mode_matches = [t for t in tmpfs_opts if t in allowed_mode_tokens]
+            if not (has_rw and has_nosuid and len(size_matches) == 1 and len(mode_matches) == 1 and len(tmpfs_opts) == 4):
+                profile_mismatches.append(f"HostConfig.Tmpfs['/tmp']={tmpfs_map['/tmp']!r} invalid")
+
+        expected_binds = {
+            "/product": (str(product_dir.resolve()), False),
+            "/ci": (str(ci_dir.resolve()), False),
+            "/vendor": (str(vendor_dir.resolve()), False),
+            "/evidence": (str(evidence_dir.resolve()), True),
+        }
+        observed_binds = {}
         for m in mount_summary:
-            if m["Destination"] in ("/product", "/ci", "/vendor") and m["RW"] is not False:
-                raise RuntimeError(f"Mount {m['Destination']} must be read-only")
-            if m["Destination"] == "/evidence" and m["RW"] is not True:
-                raise RuntimeError("Mount /evidence must be read-write")
+            m_type = m.get("Type")
+            m_dst = m.get("Destination")
+            if m_type == "tmpfs":
+                if m_dst != "/tmp" or m.get("RW") is not True:
+                    profile_mismatches.append(f"Unexpected tmpfs mount in Mounts: {m}")
+            elif m_type == "bind":
+                if m_dst in observed_binds:
+                    profile_mismatches.append(f"Duplicate bind mount destination: {m_dst}")
+                observed_binds[m_dst] = m
+            else:
+                profile_mismatches.append(f"Disallowed mount type in Mounts: {m}")
+
+        if set(observed_binds.keys()) != set(expected_binds.keys()):
+            profile_mismatches.append(
+                f"Bind mount destinations {sorted(observed_binds.keys())} != {sorted(expected_binds.keys())}"
+            )
+        else:
+            for dst, (exp_src, exp_rw) in expected_binds.items():
+                obs_m = observed_binds[dst]
+                obs_src = str(Path(obs_m.get("Source") or "").resolve()) if obs_m.get("Source") else ""
+                if obs_src != exp_src:
+                    profile_mismatches.append(f"Bind mount {dst} Source {obs_src!r} != {exp_src!r}")
+                if obs_m.get("RW") is not exp_rw:
+                    profile_mismatches.append(f"Bind mount {dst} RW={obs_m.get('RW')} != {exp_rw}")
 
         report["stages"]["container_profile_before_start"] = {
+            "ok": len(profile_mismatches) == 0,
             "container_id": container_id,
+            "container_image_id": container_image_id,
+            "pinned_image_id": img_id,
             "network_mode": hc.get("NetworkMode"),
             "readonly_rootfs": hc.get("ReadonlyRootfs"),
+            "init": hc.get("Init"),
+            "privileged": hc.get("Privileged"),
             "cap_drop": hc.get("CapDrop"),
+            "cap_add": hc.get("CapAdd"),
             "security_opt": hc.get("SecurityOpt"),
             "ipc_mode": hc.get("IpcMode"),
             "shm_size": hc.get("ShmSize"),
             "nano_cpus": hc.get("NanoCpus"),
             "memory": hc.get("Memory"),
             "pids_limit": hc.get("PidsLimit"),
+            "binds": hc.get("Binds"),
+            "devices": hc.get("Devices"),
+            "tmpfs": hc.get("Tmpfs"),
+            "working_dir": ccfg.get("WorkingDir"),
+            "config_volumes": ccfg.get("Volumes"),
             "mounts": mount_summary,
+            "mismatches": profile_mismatches,
         }
+        if profile_mismatches:
+            raise RuntimeError(f"Container profile verification failed before start: {profile_mismatches}")
 
         # Start and wait for inside execution (isolation 15s + unit 90s + C3a 90s + U1 90s = 285s max)
         s_exec_start = time.monotonic()

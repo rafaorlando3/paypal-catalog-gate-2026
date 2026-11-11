@@ -147,6 +147,7 @@ function runSubprocess(label, cmd, args, { cwd, env, timeoutMs }) {
     let timedOut = false;
     let killTimer = null;
     let spawnErrStr = null;
+    const hadPid = typeof child.pid === 'number' && child.pid > 0;
     let settled = false;
 
     child.on('error', (err) => {
@@ -191,11 +192,13 @@ function runSubprocess(label, cmd, args, { cwd, env, timeoutMs }) {
       const errBuf = Buffer.concat(stderrChunks);
       const outMeta = writeEvidenceFile(`${label}.stdout.log`, outBuf);
       const errMeta = writeEvidenceFile(`${label}.stderr.log`, errBuf);
+      const notStarted = !hadPid || (spawnErrStr !== null && (code === null || code < 0) && signal === null);
+      const normalizedExit = notStarted ? null : (typeof code === 'number' ? code : null);
       resolve({
         label,
-        not_started: spawnErrStr !== null && code === null && signal === null,
+        not_started: notStarted,
         spawn_error: spawnErrStr,
-        exit_code: typeof code === 'number' ? code : null,
+        exit_code: normalizedExit,
         signal: signal || null,
         timed_out: timedOut,
         truncated,
@@ -321,7 +324,12 @@ function parseTapOutput(tapText) {
 async function runE2eWithFreshServer(label, scriptRelPath, dataDirPath, stageBudgetSec) {
   const stageStart = Date.now();
   const totalBudgetMs = stageBudgetSec * 1000;
-  fs.mkdirSync(dataDirPath, { recursive: true });
+  let setupError = null;
+  try {
+    fs.mkdirSync(dataDirPath, { recursive: true });
+  } catch (mkdirErr) {
+    setupError = `Failed to create DATA_DIR ${dataDirPath}: ${String(mkdirErr && mkdirErr.message ? mkdirErr.message : mkdirErr)}`;
+  }
 
   const port = Number(PINS.runtime.port || 8799);
   const baseUrl = `http://localhost:${port}`;
@@ -340,16 +348,20 @@ async function runE2eWithFreshServer(label, scriptRelPath, dataDirPath, stageBud
   };
 
   let srvChild = null;
-  let srvSpawnError = null;
-  try {
-    srvChild = spawn(process.execPath, ['src/servidor.mjs'], {
-      cwd: '/product',
-      env: serverEnv,
-      detached: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-  } catch (err) {
-    srvSpawnError = String(err && err.message ? err.message : err);
+  let srvSpawnError = setupError;
+  let srvHadPid = false;
+  if (!setupError) {
+    try {
+      srvChild = spawn(process.execPath, ['src/servidor.mjs'], {
+        cwd: '/product',
+        env: serverEnv,
+        detached: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      srvHadPid = Boolean(srvChild && typeof srvChild.pid === 'number' && srvChild.pid > 0);
+    } catch (err) {
+      srvSpawnError = String(err && err.message ? err.message : err);
+    }
   }
 
   if (srvChild) {
@@ -397,7 +409,8 @@ async function runE2eWithFreshServer(label, scriptRelPath, dataDirPath, stageBud
     }
     srvChild.on('close', (code, sig) => {
       srvClosed = true;
-      srvExitCode = typeof code === 'number' ? code : null;
+      const srvNotStarted = !srvHadPid || (srvSpawnError !== null && (code === null || code < 0) && sig === null);
+      srvExitCode = srvNotStarted ? null : (typeof code === 'number' ? code : null);
       srvSignal = sig || null;
       res();
     });
@@ -466,6 +479,7 @@ async function runE2eWithFreshServer(label, scriptRelPath, dataDirPath, stageBud
     readiness,
     readiness_error: readinessError,
     server: {
+      not_started: !srvHadPid || srvSpawnError !== null,
       spawn_error: srvSpawnError,
       exit_code: srvExitCode,
       signal: srvSignal,
