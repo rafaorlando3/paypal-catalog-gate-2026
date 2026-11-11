@@ -7,11 +7,12 @@
 const { chromium } = require('playwright');
 const BASE = process.env.BASE || 'http://localhost:8799';
 const resultado = {};
+const RE_409 = /^Failed to load resource: the server responded with a status of 409 \(Conflict\)$/;
 
 async function cenario(b, nome, corpo) {
   const ctx = await b.newContext({ viewport: { width: 1280, height: 900 } });
   const pg = await ctx.newPage();
-  const falhas = []; const posts = []; const erros = []; const retidos = [];
+  const falhas = []; const posts = []; const erros = []; const retidos = []; const esperados409 = new Map(); const diagn409 = [];
   const comPrazo = (promessa, rotulo, ms = 15000) => new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error(`timeout (${ms}ms): ${rotulo}`)), ms);
     promessa.then(
@@ -20,7 +21,18 @@ async function cenario(b, nome, corpo) {
     );
   });
   pg.on('pageerror', (e) => erros.push(String(e)));
-  pg.on('console', (m) => { if (m.type() === 'error') erros.push(m.text()); });
+  pg.on('console', (m) => {
+    if (m.type() !== 'error') return;
+    const txt = m.text();
+    const locUrl = m.location()?.url || '';
+    const pend = esperados409.get(locUrl) || 0;
+    if (RE_409.test(txt) && pend > 0) {
+      esperados409.set(locUrl, pend - 1);
+      diagn409.push({ url: locUrl, text: txt });
+      return;
+    }
+    erros.push(txt);
+  });
   pg.on('request', (r) => { if (r.method() === 'POST') posts.push(new URL(r.url()).pathname); });
   const h = {
     pg, posts, conferir: (cond, msg) => { if (!cond) falhas.push(msg); },
@@ -90,7 +102,12 @@ async function cenario(b, nome, corpo) {
         window.__u1Obs = obs;
       });
       return () => pg.evaluate(() => {
-        if (window.__u1Obs) { window.__u1Obs.disconnect(); delete window.__u1Obs; }
+        if (window.__u1Obs) {
+          const pend = window.__u1Obs.takeRecords();
+          window.__u1Mutacoes += pend.length;
+          window.__u1Obs.disconnect();
+          delete window.__u1Obs;
+        }
         return window.__u1Mutacoes || 0;
       });
     },
@@ -106,28 +123,34 @@ async function cenario(b, nome, corpo) {
      */
     async segurar(filtro, modo = 'servidor') {
       let abrirLiberado, chegouOk, chegouErro, fimOk, fimErro, resposta, corpoJson;
-      let reivindicado = false, solto = false, desregistrado = false, rotaCapturada = null;
+      let reivindicado = false, solto = false, tratado = false, abortado = false, desregistrado = false, rotaCapturada = null;
       const liberado = new Promise((r) => { abrirLiberado = r; });
       const chegadaBruta = new Promise((res, rej) => { chegouOk = res; chegouErro = rej; });
       const concluidoBruto = new Promise((res, rej) => { fimOk = res; fimErro = rej; });
       chegadaBruta.catch(() => {});
       concluidoBruto.catch(() => {});
       const handler = async (route) => {
-        if (reivindicado || !filtro(route.request())) return route.fallback();
+        if (solto || reivindicado || !filtro(route.request())) return route.fallback();
         reivindicado = true;
         rotaCapturada = route;
+        const urlReq = route.request().url();
         try {
           if (modo === 'servidor') {
             resposta = await route.fetch();
             const st = resposta.status();
-            if (st < 200 || st >= 300) throw new Error(`unexpected held HTTP ${st} for ${route.request().url()}`);
+            if (st < 200 || st >= 300) throw new Error(`unexpected held HTTP ${st} for ${urlReq}`);
             corpoJson = await resposta.json();
             chegouOk();
             await liberado;
+            if (abortado || tratado) return;
+            tratado = true;
             await route.fulfill({ response: resposta });
           } else {
             chegouOk();
             await liberado;
+            if (abortado || tratado) return;
+            tratado = true;
+            esperados409.set(urlReq, (esperados409.get(urlReq) || 0) + 1);
             await route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ erro: modo }) });
           }
           fimOk();
@@ -136,14 +159,27 @@ async function cenario(b, nome, corpo) {
           fimErro(e);
         }
       };
+      const abortarSePendente = async (contexto) => {
+        if (reivindicado && rotaCapturada && !tratado && !abortado) {
+          abortado = true;
+          try {
+            await rotaCapturada.abort();
+          } catch (e) {
+            falhas.push(`route abort error in ${nome} (${contexto}): ${e && e.message || e}`);
+          }
+        }
+      };
       const removerRota = async () => {
         if (!desregistrado) {
           desregistrado = true;
-          await pg.unroute('**/api/**', handler);
+          try {
+            await pg.unroute('**/api/**', handler);
+          } catch (e) {
+            falhas.push(`route unroute error in ${nome} (${modo}): ${e && e.message || e}`);
+          }
         }
       };
       const item = {
-         get solto() { return solto; },
         encerrarForcado: async () => {
           if (!solto) {
             falhas.push(`unreleased hold in ${nome} (${modo})`);
@@ -159,9 +195,10 @@ async function cenario(b, nome, corpo) {
             if (reivindicado) await comPrazo(concluidoBruto, `hold cleanup ${nome}`, 5000);
           } catch (e) {
             falhas.push(`hold error in ${nome}: ${e && e.message || e}`);
-            if (rotaCapturada) await rotaCapturada.abort().catch(() => {});
+            await abortarSePendente('cleanup');
           } finally {
-            await removerRota().catch(() => {});
+            if (reivindicado && !tratado && !abortado) await abortarSePendente('cleanup-finally');
+            await removerRota();
           }
         },
       };
@@ -174,7 +211,11 @@ async function cenario(b, nome, corpo) {
           abrirLiberado();
           try {
             await comPrazo(concluidoBruto, `hold completion (${modo})`);
+          } catch (e) {
+            await abortarSePendente('soltar');
+            throw e;
           } finally {
+            if (reivindicado && !tratado && !abortado) await abortarSePendente('soltar-finally');
             await removerRota();
           }
           await h.assentar();
@@ -193,7 +234,7 @@ async function cenario(b, nome, corpo) {
     for (const r of retidos) await r.encerrarForcado();
   }
   if (erros.length) falhas.push(`browser errors: ${erros.join(' | ')}`);
-  resultado[nome] = { ok: falhas.length === 0, falhas, posts };
+  resultado[nome] = { ok: falhas.length === 0, falhas, posts, diagn409 };
   await ctx.close();
 }
 
