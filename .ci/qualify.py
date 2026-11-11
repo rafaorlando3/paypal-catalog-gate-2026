@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -53,6 +54,30 @@ FORBIDDEN_ENV_KEYS = (
 )
 
 
+class DeadlineExpiredError(RuntimeError):
+    pass
+
+
+_ACTIVE_DEADLINE = None
+
+
+def set_active_deadline(deadline: float) -> None:
+    global _ACTIVE_DEADLINE
+    _ACTIVE_DEADLINE = deadline
+
+
+def remaining(deadline: float = None, cap: float = None) -> float:
+    target = _ACTIVE_DEADLINE if deadline is None else deadline
+    if target is None:
+        return float(cap) if cap is not None else 30.0
+    rem = target - time.monotonic()
+    if rem <= 0.0:
+        raise DeadlineExpiredError("Stage or global monotonic deadline expired")
+    if cap is not None:
+        return min(float(cap), rem)
+    return rem
+
+
 def utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -86,14 +111,15 @@ def validate_rel_path(rel: str) -> None:
             raise ValueError(f"Disallowed path segment in {rel!r}")
 
 
-def run_cmd(args, *, cwd=None, timeout=30.0, check=True):
+def run_cmd(args, *, cwd=None, timeout=30.0, deadline=None, check=True):
+    eff_timeout = remaining(deadline, timeout)
     res = subprocess.run(
         args,
         cwd=str(cwd) if cwd else None,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        timeout=timeout,
+        timeout=eff_timeout,
         check=False,
     )
     if check and res.returncode != 0:
@@ -103,7 +129,7 @@ def run_cmd(args, *, cwd=None, timeout=30.0, check=True):
     return res
 
 
-def verify_directory_against_pins(root: Path, expected_files: list, expected_total_bytes: int) -> dict:
+def verify_directory_against_pins(root: Path, expected_files: list, expected_total_bytes: int, deadline: float = None) -> dict:
     expected_map = {item["path"]: item for item in expected_files}
     if len(expected_map) != len(expected_files):
         raise RuntimeError("Duplicate path entries in pins.json")
@@ -111,6 +137,7 @@ def verify_directory_against_pins(root: Path, expected_files: list, expected_tot
     discovered = []
     total_bytes = 0
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        remaining(deadline)
         dir_p = Path(dirpath)
         for d in dirnames:
             dp = dir_p / d
@@ -118,6 +145,7 @@ def verify_directory_against_pins(root: Path, expected_files: list, expected_tot
             if stat.S_ISLNK(st.st_mode):
                 raise RuntimeError(f"Symlink directory found: {dp}")
         for fn in filenames:
+            remaining(deadline)
             fp = dir_p / fn
             st = os.lstat(fp)
             if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
@@ -164,15 +192,14 @@ def download_and_extract_npm_pkg(pkg_spec: dict, dest_node_modules: Path, deadli
         raise RuntimeError(f"Unsupported SRI format for {name}: {integrity}")
     expected_b64 = integrity[len("sha512-"):]
 
-    rem = max(5.0, deadline - time.monotonic())
     req = urllib.request.Request(url, headers={"User-Agent": "catalog-gate-ci-offline/1.0"})
     buf = bytearray()
-    with urllib.request.urlopen(req, timeout=min(30.0, rem)) as resp:
+    with urllib.request.urlopen(req, timeout=remaining(deadline, 30.0)) as resp:
         if resp.status != 200:
             raise RuntimeError(f"HTTP {resp.status} for {url}")
         while True:
-            if time.monotonic() > deadline:
-                raise RuntimeError(f"Deadline exceeded downloading {name}")
+            remaining(deadline)
+            resp.fp.raw._sock.settimeout(remaining(deadline, 15.0)) if getattr(getattr(resp, "fp", None), "raw", None) and getattr(resp.fp.raw, "_sock", None) else None
             chunk = resp.read(65536)
             if not chunk:
                 break
@@ -198,8 +225,7 @@ def download_and_extract_npm_pkg(pkg_spec: dict, dest_node_modules: Path, deadli
     try:
         with tarfile.open(tgz_tmp, mode="r|gz") as tf:
             for member in tf:
-                if time.monotonic() > deadline:
-                    raise RuntimeError(f"Deadline exceeded extracting {name}")
+                remaining(deadline)
                 members_count += 1
                 if members_count > max_members:
                     raise RuntimeError(f"Member count exceeded {max_members} for {name}")
@@ -236,6 +262,7 @@ def download_and_extract_npm_pkg(pkg_spec: dict, dest_node_modules: Path, deadli
                     written = 0
                     with target_path.open("wb") as out_f:
                         while True:
+                            remaining(deadline)
                             chunk = fobj.read(65536)
                             if not chunk:
                                 break
@@ -272,12 +299,13 @@ def emit_framed_report(report: dict) -> None:
     sys.stdout.flush()
 
 
-def read_regular_file_bounded(fpath: Path, expected_size: int, max_bytes: int) -> bytes:
+def read_regular_file_bounded(fpath: Path, expected_size: int, max_bytes: int, deadline: float = None) -> bytes:
     if expected_size < 0 or expected_size > max_bytes:
         raise RuntimeError(f"File size {expected_size} out of bounds (max {max_bytes}) for {fpath.name}")
     buf = bytearray()
     with fpath.open("rb") as f:
         while True:
+            remaining(deadline)
             chunk = f.read(65536)
             if not chunk:
                 break
@@ -289,11 +317,12 @@ def read_regular_file_bounded(fpath: Path, expected_size: int, max_bytes: int) -
     return bytes(buf)
 
 
-def emit_evidence_files(evidence_dir: Path, max_file_bytes: int, max_total_bytes: int, require_all: bool) -> dict:
+def emit_evidence_files(evidence_dir: Path, max_file_bytes: int, max_total_bytes: int, require_all: bool, deadline: float = None) -> dict:
     emitted = []
     errors = []
     total_bytes = 0
     try:
+        remaining(deadline)
         if not evidence_dir or not evidence_dir.is_dir():
             if require_all:
                 errors.append("Evidence directory missing")
@@ -304,6 +333,7 @@ def emit_evidence_files(evidence_dir: Path, max_file_bytes: int, max_total_bytes
                 errors.append(f"Unexpected file in evidence_dir: {entry}")
 
         for fname in ALLOWED_EVIDENCE_FILES:
+            remaining(deadline)
             fpath = evidence_dir / fname
             try:
                 st = os.lstat(fpath)
@@ -326,7 +356,7 @@ def emit_evidence_files(evidence_dir: Path, max_file_bytes: int, max_total_bytes
                 errors.append(f"Evidence total st_size exceeds max_total_bytes ({total_bytes + st_size} > {max_total_bytes})")
                 continue
             try:
-                raw = read_regular_file_bounded(fpath, st_size, max_file_bytes)
+                raw = read_regular_file_bounded(fpath, st_size, max_file_bytes, deadline=deadline)
             except Exception as exc:
                 errors.append(f"Read error on {fname}: {exc}")
                 continue
@@ -364,6 +394,7 @@ def reconcile_and_close_container(
     preexisting_before_intent: bool,
     wait_rc_str: str,
     timed_out_waiting: bool,
+    closure_deadline: float,
 ) -> dict:
     rec = {
         "create_intent": create_intent,
@@ -398,7 +429,8 @@ def reconcile_and_close_container(
     try:
         ps_res = run_cmd(
             ["docker", "ps", "-aq", "--no-trunc", "--filter", f"name=^/{container_name}$"],
-            timeout=10,
+            timeout=10.0,
+            deadline=closure_deadline,
             check=False,
         )
         if ps_res.returncode != 0:
@@ -426,7 +458,7 @@ def reconcile_and_close_container(
         return rec
 
     try:
-        insp_res = run_cmd(["docker", "inspect", cid], timeout=10, check=False)
+        insp_res = run_cmd(["docker", "inspect", cid], timeout=10.0, deadline=closure_deadline, check=False)
         if insp_res.returncode != 0:
             rec["errors"].append(f"docker inspect {cid} failed (rc={insp_res.returncode}): {insp_res.stderr.strip()[:200]}")
             return rec
@@ -459,16 +491,16 @@ def reconcile_and_close_container(
     if state_obj.get("Running") is True or state_obj.get("Status") in ("running", "paused", "restarting"):
         rec["kill_attempted"] = True
         try:
-            k_res = run_cmd(["docker", "kill", cid], timeout=15, check=False)
+            k_res = run_cmd(["docker", "kill", cid], timeout=15.0, deadline=closure_deadline, check=False)
             rec["kill_rc"] = k_res.returncode
-            w_res = run_cmd(["docker", "wait", cid], timeout=15, check=False)
+            w_res = run_cmd(["docker", "wait", cid], timeout=15.0, deadline=closure_deadline, check=False)
             rec["wait_after_kill_rc"] = w_res.returncode
         except Exception as exc:
             rec["errors"].append(f"kill/wait exception on {cid}: {exc}")
             return rec
 
         try:
-            insp2_res = run_cmd(["docker", "inspect", cid], timeout=10, check=False)
+            insp2_res = run_cmd(["docker", "inspect", cid], timeout=10.0, deadline=closure_deadline, check=False)
             if insp2_res.returncode != 0:
                 rec["errors"].append(f"post-kill inspect failed (rc={insp2_res.returncode})")
                 return rec
@@ -502,7 +534,7 @@ def reconcile_and_close_container(
 
     rec["rm_attempted"] = True
     try:
-        rm_res = run_cmd(["docker", "rm", "--volumes", cid], timeout=20, check=False)
+        rm_res = run_cmd(["docker", "rm", "--volumes", cid], timeout=20.0, deadline=closure_deadline, check=False)
         rec["rm_rc"] = rm_res.returncode
         if rm_res.returncode != 0:
             rec["errors"].append(f"docker rm {cid} failed (rc={rm_res.returncode}): {rm_res.stderr.strip()[:200]}")
@@ -514,7 +546,8 @@ def reconcile_and_close_container(
     try:
         scan_res = run_cmd(
             ["docker", "ps", "-aq", "--no-trunc", "--filter", f"name=^/{container_name}$"],
-            timeout=10,
+            timeout=10.0,
+            deadline=closure_deadline,
             check=False,
         )
         if scan_res.returncode != 0:
@@ -576,11 +609,20 @@ def main() -> int:
     pins = json.loads(pins_path.read_text(encoding="utf-8"))
     pins_sha256 = sha256_file(pins_path)
     budgets = pins["budgets"]
-    total_deadline = t0 + float(budgets["total_seconds"])
+    total_seconds = float(budgets["total_seconds"])
     reserve_seconds = float(budgets["closure_reserve_seconds"])
+    audit_seconds = float(budgets["audit_seconds"])
+    total_deadline = t0 + total_seconds
     execution_deadline = total_deadline - reserve_seconds
+    closure_deadline = total_deadline - audit_seconds
     max_file_bytes = int(pins["evidence"]["max_file_bytes"])
     max_total_bytes = int(pins["evidence"]["max_total_bytes"])
+
+    def _sigalrm_handler(signum, frame):
+        raise DeadlineExpiredError("Global 600s ITIMER_REAL watchdog expired")
+
+    signal.signal(signal.SIGALRM, _sigalrm_handler)
+    signal.setitimer(signal.ITIMER_REAL, max(0.1, total_deadline - time.monotonic()))
 
     workspace_dir = None
     product_dir = None
@@ -597,6 +639,7 @@ def main() -> int:
         # Stage 1: Preflight & exact 55-blob materialization (45s)
         s1_start = time.monotonic()
         s1_deadline = min(execution_deadline, s1_start + float(budgets["preflight_seconds"]))
+        set_active_deadline(s1_deadline)
 
         prod_cfg = pins["product"]
         exp_commit = prod_cfg["commit"]
@@ -665,6 +708,7 @@ def main() -> int:
         extra_in_head = sorted(overlay_blobs.keys())
 
         for ov_rel, exp_ov_blob in overlay_blobs.items():
+            remaining(s1_deadline)
             ov_fp = repo_root / ov_rel
             st = os.lstat(ov_fp)
             if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
@@ -686,8 +730,7 @@ def main() -> int:
         os.chmod(evidence_dir, 0o777)
 
         for item in exp_files:
-            if time.monotonic() > s1_deadline:
-                raise RuntimeError("Stage 1 preflight deadline exceeded")
+            remaining(s1_deadline)
             rel = item["path"]
             validate_rel_path(rel)
             if rel not in ls_entries:
@@ -705,7 +748,7 @@ def main() -> int:
                 cwd=str(repo_root),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                timeout=10,
+                timeout=remaining(s1_deadline, 10.0),
                 check=True,
             )
             raw = cat_p.stdout
@@ -721,7 +764,7 @@ def main() -> int:
             dest.write_bytes(raw)
             os.chmod(dest, 0o444)
 
-        pre_audit = verify_directory_against_pins(product_dir, exp_files, exp_total_bytes)
+        pre_audit = verify_directory_against_pins(product_dir, exp_files, exp_total_bytes, deadline=s1_deadline)
 
         # Copy CI runtime files into read-only ci mount directory
         shutil.copy2(repo_root / ".ci" / "inside.mjs", ci_dir / "inside.mjs")
@@ -729,9 +772,12 @@ def main() -> int:
         os.chmod(ci_dir / "inside.mjs", 0o444)
         os.chmod(ci_dir / "pins.json", 0o444)
 
+        s1_dur = time.monotonic() - s1_start
+        if s1_dur > float(budgets["preflight_seconds"]):
+            raise DeadlineExpiredError(f"Preflight exceeded budget: {s1_dur:.3f}s")
         report["stages"]["preflight"] = {
             "ok": True,
-            "duration_seconds": round(time.monotonic() - s1_start, 3),
+            "duration_seconds": round(s1_dur, 6),
             "product_commit": exp_commit,
             "product_tree": exp_tree,
             "ci_overlay_commit": head_sha,
@@ -746,6 +792,7 @@ def main() -> int:
         # Stage 2: Toolchain pull + 2 NPM tarballs verified extraction (120s)
         s2_start = time.monotonic()
         s2_deadline = min(execution_deadline, s2_start + float(budgets["toolchain_seconds"]))
+        set_active_deadline(s2_deadline)
         tc = pins["toolchain"]
         nm_dir = vendor_dir / "node_modules"
         nm_dir.mkdir(parents=True, exist_ok=True)
@@ -758,10 +805,10 @@ def main() -> int:
             if not (nm_dir / sib / "package.json").is_file():
                 raise RuntimeError(f"Missing extracted sibling package: {sib}")
 
-        rem_pull = max(5.0, s2_deadline - time.monotonic())
         run_cmd(
             ["docker", "pull", "--platform", tc["platform"], tc["image"]],
-            timeout=rem_pull,
+            timeout=remaining(s2_deadline),
+            deadline=s2_deadline,
         )
         img_inspect_raw = run_cmd(["docker", "image", "inspect", tc["image"]], timeout=15).stdout
         img_inspect = json.loads(img_inspect_raw)[0]
@@ -777,9 +824,12 @@ def main() -> int:
         if not img_id:
             raise RuntimeError("Pulled image Id is missing")
 
+        s2_dur = time.monotonic() - s2_start
+        if s2_dur > float(budgets["toolchain_seconds"]):
+            raise DeadlineExpiredError(f"Toolchain stage exceeded budget: {s2_dur:.3f}s")
         report["stages"]["toolchain"] = {
             "ok": True,
-            "duration_seconds": round(time.monotonic() - s2_start, 3),
+            "duration_seconds": round(s2_dur, 6),
             "image": tc["image"],
             "image_id": img_id,
             "repo_digests": repo_digests,
@@ -789,6 +839,17 @@ def main() -> int:
             "image_config_volumes": img_cfg.get("Volumes"),
             "npm_packages": npm_reports,
         }
+
+        # Stage 3-6 Execution budget (isolation 15s + unit 90s + C3a 90s + U1 90s = 285s, hard cutoff at execution_deadline 480s)
+        s_exec_start = time.monotonic()
+        stage_exec_budget = (
+            float(budgets["isolation_seconds"])
+            + float(budgets["unit_seconds"])
+            + float(budgets["e2e_C3a_seconds"])
+            + float(budgets["e2e_U1_seconds"])
+        )
+        exec_wait_deadline = min(execution_deadline, s_exec_start + stage_exec_budget)
+        set_active_deadline(exec_wait_deadline)
 
         # Create single container (collision precheck by NAME only)
         existing = run_cmd(
@@ -840,6 +901,7 @@ def main() -> int:
             *inside_allowlist_env,
             "node", "/ci/inside.mjs",
         ]
+        create_timeout = remaining(exec_wait_deadline, 20.0)
         create_intent = True
         create_outcome = "UNCERTAIN"
         try:
@@ -848,7 +910,7 @@ def main() -> int:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                timeout=20,
+                timeout=create_timeout,
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
@@ -1001,25 +1063,20 @@ def main() -> int:
         if profile_mismatches:
             raise RuntimeError(f"Container profile verification failed before start: {profile_mismatches}")
 
-        # Start and wait for inside execution (isolation 15s + unit 90s + C3a 90s + U1 90s = 285s max)
-        s_exec_start = time.monotonic()
-        stage_exec_budget = (
-            float(budgets["isolation_seconds"])
-            + float(budgets["unit_seconds"])
-            + float(budgets["e2e_C3a_seconds"])
-            + float(budgets["e2e_U1_seconds"])
-        )
-        exec_wait_deadline = min(execution_deadline, s_exec_start + stage_exec_budget)
-
-        run_cmd(["docker", "start", container_name], timeout=15)
-        wait_timeout = max(5.0, exec_wait_deadline - time.monotonic())
+        run_cmd(["docker", "start", container_name], timeout=15.0, deadline=exec_wait_deadline)
         try:
-            wait_res = run_cmd(["docker", "wait", container_name], timeout=wait_timeout, check=False)
+            wait_res = run_cmd(
+                ["docker", "wait", container_name],
+                timeout=remaining(exec_wait_deadline),
+                deadline=exec_wait_deadline,
+                check=False,
+            )
             wait_rc_str = wait_res.stdout.strip()
-        except subprocess.TimeoutExpired:
+        except (subprocess.TimeoutExpired, DeadlineExpiredError):
             timed_out_waiting = True
             wait_rc_str = "TIMEOUT"
 
+        set_active_deadline(closure_deadline)
         closure_rec = reconcile_and_close_container(
             container_name=container_name,
             pinned_image_id=img_id,
@@ -1029,6 +1086,7 @@ def main() -> int:
             preexisting_before_intent=preexisting_before_intent,
             wait_rc_str=wait_rc_str,
             timed_out_waiting=timed_out_waiting,
+            closure_deadline=closure_deadline,
         )
         report["cleanup"]["container_closure"] = closure_rec
         t_insp = closure_rec.get("terminal_inspect") or {}
@@ -1043,7 +1101,9 @@ def main() -> int:
 
         # Stage 7: Post-execution audit of 55 product blobs & evidence collection (30s)
         s7_start = time.monotonic()
-        post_audit = verify_directory_against_pins(product_dir, exp_files, exp_total_bytes)
+        s7_deadline = min(total_deadline, s7_start + audit_seconds)
+        set_active_deadline(s7_deadline)
+        post_audit = verify_directory_against_pins(product_dir, exp_files, exp_total_bytes, deadline=s7_deadline)
         inside_summary_path = evidence_dir / "inside-summary.json"
         inside_summary = None
         try:
@@ -1053,13 +1113,16 @@ def main() -> int:
         if st_sum is not None:
             if stat.S_ISLNK(st_sum.st_mode) or not stat.S_ISREG(st_sum.st_mode):
                 raise RuntimeError("inside-summary.json is not a regular file")
-            raw_inside = read_regular_file_bounded(inside_summary_path, int(st_sum.st_size), max_file_bytes)
+            raw_inside = read_regular_file_bounded(inside_summary_path, int(st_sum.st_size), max_file_bytes, deadline=s7_deadline)
             inside_summary = json.loads(raw_inside.decode("utf-8"))
 
+        s7_dur = time.monotonic() - s7_start
+        if s7_dur > audit_seconds:
+            raise DeadlineExpiredError(f"Post-audit stage exceeded budget: {s7_dur:.3f}s")
         report["stages"]["inside"] = inside_summary
         report["stages"]["post_audit"] = {
             "ok": True,
-            "duration_seconds": round(time.monotonic() - s7_start, 3),
+            "duration_seconds": round(s7_dur, 6),
             "audit_started_after_closure_utc": utc_now(),
             "post_audit": post_audit,
             "container_removed_confirmed": bool(closure_rec.get("closure_confirmed")),
@@ -1081,26 +1144,30 @@ def main() -> int:
         if not inside_summary or inside_summary.get("ok") is not True:
             raise RuntimeError(f"inside.mjs reported failure: {inside_summary.get('failure_reason') if inside_summary else 'missing summary'}")
 
-        ev_emission = emit_evidence_files(evidence_dir, max_file_bytes, max_total_bytes, require_all=True)
+        ev_emission = emit_evidence_files(evidence_dir, max_file_bytes, max_total_bytes, require_all=True, deadline=s7_deadline)
         report["stages"]["evidence_emission"] = ev_emission
         if not ev_emission.get("ok"):
             raise RuntimeError(f"Evidence emission failed: {ev_emission.get('errors')}")
 
-        report["ok"] = True
-        report["finished_at_utc"] = utc_now()
-        report["total_duration_seconds"] = round(time.monotonic() - t0, 3)
+        remaining(s7_deadline)
         if workspace_dir and workspace_dir.exists():
             shutil.rmtree(workspace_dir, ignore_errors=True)
             report["cleanup"]["workspace_removed"] = not workspace_dir.exists()
         workspace_dir = None
+
+        elapsed = time.monotonic() - t0
+        if not (0.0 < elapsed <= total_seconds):
+            raise DeadlineExpiredError(f"Total elapsed {elapsed:.6f}s outside valid budget (0, {total_seconds}]")
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        report["ok"] = True
+        report["finished_at_utc"] = utc_now()
+        report["total_duration_seconds"] = elapsed
         emit_framed_report(report)
         return 0
 
     except Exception as exc:
         report["ok"] = False
         report["failure_reason"] = str(exc)
-        report["finished_at_utc"] = utc_now()
-        report["total_duration_seconds"] = round(time.monotonic() - t0, 3)
         if "container_closure" not in report["cleanup"]:
             closure_rec = reconcile_and_close_container(
                 container_name=container_name,
@@ -1111,6 +1178,7 @@ def main() -> int:
                 preexisting_before_intent=preexisting_before_intent,
                 wait_rc_str=wait_rc_str,
                 timed_out_waiting=timed_out_waiting,
+                closure_deadline=closure_deadline,
             )
             report["cleanup"]["container_closure"] = closure_rec
             report["cleanup"]["container_removed_before_audit"] = bool(closure_rec.get("closure_confirmed"))
@@ -1118,13 +1186,15 @@ def main() -> int:
             closure_rec = report["cleanup"]["container_closure"]
 
         if workspace_dir and closure_rec.get("closure_confirmed"):
+            fail_audit_deadline = min(total_deadline, time.monotonic() + audit_seconds)
             if product_dir and product_dir.is_dir() and "post_audit" not in report["stages"]:
                 try:
                     report["stages"]["post_audit"] = {
                         "ok": True,
                         "audit_started_after_closure_utc": utc_now(),
                         "post_audit": verify_directory_against_pins(
-                            product_dir, pins["product"]["files"], int(pins["product"]["total_bytes"])
+                            product_dir, pins["product"]["files"], int(pins["product"]["total_bytes"]),
+                            deadline=fail_audit_deadline,
                         ),
                         "container_removed_confirmed": True,
                     }
@@ -1134,23 +1204,30 @@ def main() -> int:
                 sum_fp = evidence_dir / "inside-summary.json"
                 if not report["stages"].get("inside"):
                     try:
+                        remaining(fail_audit_deadline)
                         st_s = os.lstat(sum_fp)
                         if not stat.S_ISLNK(st_s.st_mode) and stat.S_ISREG(st_s.st_mode):
-                            raw_s = read_regular_file_bounded(sum_fp, int(st_s.st_size), max_file_bytes)
+                            raw_s = read_regular_file_bounded(sum_fp, int(st_s.st_size), max_file_bytes, deadline=fail_audit_deadline)
                             report["stages"]["inside"] = json.loads(raw_s.decode("utf-8"))
                     except Exception:
                         pass
                 if "evidence_emission" not in report["stages"]:
                     try:
                         report["stages"]["evidence_emission"] = emit_evidence_files(
-                            evidence_dir, max_file_bytes, max_total_bytes, require_all=False
+                            evidence_dir, max_file_bytes, max_total_bytes, require_all=False, deadline=fail_audit_deadline
                         )
                     except Exception as ev_exc:
                         report["stages"]["evidence_emission"] = {"ok": False, "errors": [str(ev_exc)]}
-            shutil.rmtree(workspace_dir, ignore_errors=True)
-            report["cleanup"]["workspace_removed"] = not workspace_dir.exists()
+            if time.monotonic() <= total_deadline:
+                shutil.rmtree(workspace_dir, ignore_errors=True)
+                report["cleanup"]["workspace_removed"] = not workspace_dir.exists()
+            else:
+                report["cleanup"]["workspace_retained_due_to_deadline_expiry"] = True
         elif workspace_dir:
             report["cleanup"]["workspace_retained_due_to_unconfirmed_closure"] = True
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        report["finished_at_utc"] = utc_now()
+        report["total_duration_seconds"] = time.monotonic() - t0
         emit_framed_report(report)
         return 1
 
