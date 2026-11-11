@@ -1,4 +1,4 @@
-# Catalog Gate (working name)
+# Catalog Gate
 
 Pay for a catalog import only when it passes. The buyer's PayPal payment is **authorized** when the job starts and **captured in full** only after the delivered CSV passes rules agreed in advance **and** a person clicks capture. The rules decide; an AI model only explains the findings. A checker rejects any explanation that cites a line outside the file or a line without a finding. That check is about citations only: it does not prove that the explanation is semantically right.
 
@@ -64,9 +64,15 @@ After a check with findings, `Suggest fixes` lists, per finding, what the suppli
 - Webhook signature verification: https://developer.paypal.com/api/rest/webhooks/rest/
 - Webhook event names: https://developer.paypal.com/api/rest/webhooks/event-names/
 
-## Not done yet
+## Qualification and evidence
 
-Real end-to-end Sandbox order/approval/authorization/capture/webhook evidence, real advisory evaluation and the demonstration video are still pending. Existing CI run 42974702939 qualified product 51a653a with 109 unit tests, C3a Chromium and all seven U1 browser scenarios; it does not qualify this later advisory source or prove real provider calls. Credentials are private server configuration, never in this repository. A hosted demo is optional; local fixture instructions are above. Webhook postback verification through `verify-webhook-signature` is not used; self-verification is.
+The exact functional product is `e7955eda8e9413224a6b7541be40e5ede4638a57` (56 files, tree `1ccf561d97bb360915ac97434465672dfc5f8351`). [GitHub Actions run 42984498276](https://github.com/rafaorlando3/paypal-catalog-gate-2026/actions/runs/42984498276) passed 111 unit tests, the C3a Chromium regression and all seven out-of-order response scenarios. Product bytes matched before and after the run. Offline checks and fixture capture are separate from real provider evidence.
+
+On 11 November 2026, one controlled PayPal **Sandbox** flow with a virtual US seller completed with USD 50.00 of test money. The buyer personally approved the order; the application authorized it; all 200 delivery rows passed with zero rejections or duplicates and the 10-row sample matched. After explicit human acceptance of report SHA256 `2dbee90f17c3f839ac610e6fbe9863b3c864244e168da29a8ff595d580d9820c`, the acceptance was adopted into a later authorized window after the first runtime had closed, and one full capture completed from the byte-identical persisted journal. PayPal GET confirmed test capture `7YK28292045248338` as `COMPLETED`, USD 50.00, `final_capture: true`. A signed authorization webhook had also been verified. Signed capture event `WH-1PL052928A4639510-49N404522P1527148` identified that same capture and authorization. The webhook was verified after the synchronous response had already set CAPTURED; it did not cause another state transition. Temporary runtime resources and the owned webhook were removed, and 13 existing Caddy routes were preserved exactly. A previous checkout attempt stopped without authorization or capture; its cause was not established. This proves one Sandbox scenario, not general reliability or a production payment.
+
+The controlled real Gemini 3.5 Flash-Lite evaluation produced one useful explanation with correct citations to lines 46, 121 and 178. A second request timed out after 15 seconds; the third was not attempted and no call was retried. The response contained wording limitations, so it does not establish broad accuracy or reliability. Deterministic validation and human acceptance remain independent of the model. C3 repair suggestions remain AI-off.
+
+The English demonstration separates the offline fixture (simulated PayPal) from stored real Gemini and PayPal Sandbox receipts. [Watch the English demonstration (2:14)](https://www.youtube.com/watch?v=6uQO66Sukck). Credentials, signed raw webhook payloads and personal data are excluded from public evidence. The MIT-licensed working build can be run locally using the instructions above; a hosted deployment is optional. Judges use their own private credentials for optional Sandbox or real AI modes.
 
 ## License
 
